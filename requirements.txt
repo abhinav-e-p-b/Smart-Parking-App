@@ -1,0 +1,19 @@
+# Core detection
+ultralytics>=8.0.0
+easyocr>=1.7.0
+opencv-python>=4.8.0
+
+# Scientific computing
+numpy>=1.24.0
+scipy>=1.10.0
+
+# PyTorch (CPU builds - swap for CUDA builds on GPU systems)
+# For CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Database / data
+pandas>=2.0.0   # optional, used for future dashboard
+
+# Logging & config
+python-dotenv>=1.0.0  # load .env files into os.environ
