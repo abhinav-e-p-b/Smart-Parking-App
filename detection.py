@@ -8,6 +8,7 @@ import string
 import logging
 from ultralytics import YOLO
 import easyocr
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ def detect_plate(frame: np.ndarray) -> np.ndarray | None:
     return best_crop
 
 
-def _complies_format(text: str) -> bool:
+'''def _complies_format(text: str) -> bool:
     """
     Validate license plate format.
     Default: 7-char UK-style (e.g. AB12CDE).
@@ -89,10 +90,42 @@ def _complies_format(text: str) -> bool:
         (text[4] in uppers or text[4] in INT_TO_CHAR) and
         (text[5] in uppers or text[5] in INT_TO_CHAR) and
         (text[6] in uppers or text[6] in INT_TO_CHAR)
+    )'''
+def _complies_format(text: str) -> bool:
+    """
+    Validate license plate format.
+    Indian format: 2 letters + 2 digits + 2 letters + 4 digits = 10 chars
+    Example: MH12AB1234
+    Allows OCR look-alike chars (O↔0, I↔1, etc.) before correction is applied.
+    """
+    if len(text) != 10:
+        return False
+
+    uppers = string.ascii_uppercase
+    digits = string.digits
+
+    return (
+        # State code — positions 0, 1 must be letters or letter-substitutable
+        (text[0] in uppers or text[0] in INT_TO_CHAR) and
+        (text[1] in uppers or text[1] in INT_TO_CHAR) and
+
+        # District code — positions 2, 3 must be digits or digit-substitutable
+        (text[2] in digits or text[2] in CHAR_TO_INT) and
+        (text[3] in digits or text[3] in CHAR_TO_INT) and
+
+        # Series — positions 4, 5 must be letters or letter-substitutable
+        (text[4] in uppers or text[4] in INT_TO_CHAR) and
+        (text[5] in uppers or text[5] in INT_TO_CHAR) and
+
+        # Unique number — positions 6–9 must be digits or digit-substitutable
+        (text[6] in digits or text[6] in CHAR_TO_INT) and
+        (text[7] in digits or text[7] in CHAR_TO_INT) and
+        (text[8] in digits or text[8] in CHAR_TO_INT) and
+        (text[9] in digits or text[9] in CHAR_TO_INT)
     )
 
 
-def _format_plate(text: str) -> str:
+'''def _format_plate(text: str) -> str:
     """Apply character substitution mapping to correct common OCR errors."""
     mapping = {
         0: INT_TO_CHAR, 1: INT_TO_CHAR,       # positions 0,1 must be letters
@@ -102,6 +135,25 @@ def _format_plate(text: str) -> str:
     result = ""
     for i, ch in enumerate(text):
         result += mapping[i].get(ch, ch)
+    return result'''
+    
+def _format_plate(text: str) -> str:
+    """
+    Apply character substitution for Indian plate format.
+    Positions 0,1,4,5  → must be letters (apply INT_TO_CHAR)
+    Positions 2,3,6-9  → must be digits  (apply CHAR_TO_INT)
+    """
+    letter_positions = {0, 1, 4, 5}
+    digit_positions  = {2, 3, 6, 7, 8, 9}
+
+    result = ""
+    for i, ch in enumerate(text):
+        if i in letter_positions:
+            result += INT_TO_CHAR.get(ch, ch)
+        elif i in digit_positions:
+            result += CHAR_TO_INT.get(ch, ch)
+        else:
+            result += ch
     return result
 
 
