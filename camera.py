@@ -9,6 +9,7 @@ import logging
 import argparse
 from detection import detect_plate, read_plate
 from database import vehicle_inside, mark_entry, mark_exit
+from collections import defaultdict, deque
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +38,35 @@ def is_debounced(plate: str) -> bool:
     return False
 
 
+class TemporalConsistencyFilter:
+    """
+    A plate detection is only accepted if it appears in 
+    K out of the last N frames. Kills transient false positives.
+    """
+    def __init__(self, window: int = 5, min_hits: int = 3):
+        self.window = window
+        self.min_hits = min_hits
+        self.history: dict[str, deque] = defaultdict(lambda: deque(maxlen=window))
+
+    def update(self, plate: str) -> bool:
+        """Call with detected plate. Returns True only if temporally stable."""
+        self.history[plate].append(1)
+        # Pad unseen frames as 0
+        while len(self.history[plate]) < self.window:
+            self.history[plate].appendleft(0)
+        return sum(self.history[plate]) >= self.min_hits
+
+    def miss(self, plates_seen: list[str]):
+        """Call every frame with all detected plates to log misses."""
+        for plate in self.history:
+            if plate not in plates_seen:
+                self.history[plate].append(0)
+
+# Usage in run() in camera.py:
+# tcf = TemporalConsistencyFilter(window=5, min_hits=3)
+# if tcf.update(plate_text):
+#     mark_entry(plate_text)
+
 def open_camera(source) -> cv2.VideoCapture:
     """Open webcam index or RTSP URL."""
     if isinstance(source, str) and source.startswith("rtsp"):
@@ -60,6 +90,7 @@ def run(camera_mode: str, camera_source):
     """
     assert camera_mode in ("entry", "exit"), "camera_mode must be 'entry' or 'exit'"
     cap = open_camera(camera_source)
+    tcf = TemporalConsistencyFilter(window=5, min_hits=3)
     logger.info(f"Started [{camera_mode.upper()}] camera. Press 'q' to quit.")
 
     while True:
@@ -69,40 +100,64 @@ def run(camera_mode: str, camera_source):
             time.sleep(2)
             cap = open_camera(camera_source)
             continue
+        plate_text=None
+        confidence=0.0
 
-        # ── 1. Detect plate region ──────────────────────────────────────────
-        plate_crop = detect_plate(frame)
+        
+        # ── 1. MC Dropout Detection ─────────────────────────────
+        plate_crop = detect_plate(
+            frame,
+            n_passes=5,
+            consistency_threshold=0.6
+        )
+
         if plate_crop is None:
-            cv2.imshow(f"[{camera_mode.upper()}] Parking Camera", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-            continue
-
-        # ── 2. OCR ──────────────────────────────────────────────────────────
-        plate_text, confidence = read_plate(plate_crop)
-
-        if plate_text is None:
-            logger.debug("OCR returned no result")
-        elif confidence < CONFIDENCE_THRESHOLD:
-            logger.debug(f"Low confidence {confidence:.2f} for '{plate_text}' — skipped")
-        elif is_debounced(plate_text):
-            logger.debug(f"Debounced: {plate_text}")
+            tcf.miss([])
         else:
-            # ── 3. Log entry / exit ─────────────────────────────────────────
-            logger.info(f"Detected: {plate_text} (conf={confidence:.2f})")
-            if camera_mode == "entry":
-                mark_entry(plate_text)
-            else:
-                if vehicle_inside(plate_text):
-                    mark_exit(plate_text)
-                else:
-                    logger.warning(f"Exit scan for {plate_text} but no entry record found")
+            # ── 2. OCR Ensemble ─────────────────────────────────
+            plate_text, confidence = read_plate(
+                plate_crop,
+                n_variants=5
+            )
 
-        # ── 4. Display ───────────────────────────────────────────────────────
-        label = plate_text or "Detecting..."
-        cv2.putText(frame, label, (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+            # ── 3. High-Specificity Gate ───────────────────────
+            if plate_text and confidence >= CONFIDENCE_THRESHOLD:
+
+                if tcf.update(plate_text):
+
+                    if not is_debounced(plate_text):
+
+                        logger.info(
+                            f"HIGH-SPECIFICITY detection: "
+                            f"{plate_text} (conf={confidence:.2f})"
+                        )
+
+                        if camera_mode == "entry":
+                            mark_entry(plate_text)
+                        else:
+                            if vehicle_inside(plate_text):
+                                mark_exit(plate_text)
+                            else:
+                                logger.warning(
+                                    f"Exit scan for {plate_text} "
+                                    f"but no entry record found"
+                                )
+
+        # ── 4. Display ─────────────────────────────────────────
+        label = plate_text if plate_text else "Detecting..."
+
+        cv2.putText(
+            frame,
+            label,
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.2,
+            (0, 255, 0),
+            3
+        )
+
         cv2.imshow(f"[{camera_mode.upper()}] Parking Camera", frame)
+
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 

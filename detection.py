@@ -9,6 +9,9 @@ import logging
 from ultralytics import YOLO
 import easyocr
 import re
+import torch
+import random
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +26,7 @@ def _get_detector() -> YOLO:
     global _plate_detector
     if _plate_detector is None:
         logger.info("Loading license plate detector model...")
-        _plate_detector = YOLO("license_plate_detector.pt")
+        _plate_detector = YOLO("best.pt")
     return _plate_detector
 
 
@@ -42,7 +45,7 @@ def _get_reader() -> easyocr.Reader:
 CHAR_TO_INT = {'O': '0', 'I': '1', 'J': '3', 'A': '4', 'G': '6', 'S': '5'}
 INT_TO_CHAR = {v: k for k, v in CHAR_TO_INT.items()}
 
-
+'''
 def detect_plate(frame: np.ndarray) -> np.ndarray | None:
     """
     Run the YOLOv8 license plate detector on a single frame.
@@ -51,7 +54,10 @@ def detect_plate(frame: np.ndarray) -> np.ndarray | None:
         Cropped grayscale + thresholded plate image, or None if not found.
     """
     detector = _get_detector()
-    results = detector(frame, verbose=False)[0]
+    results = detector(frame, verbose=False,
+                       conf=0.65
+                       iou=0.4
+                       )[0]
 
     best_conf = 0.0
     best_crop = None
@@ -70,7 +76,61 @@ def detect_plate(frame: np.ndarray) -> np.ndarray | None:
 
     logger.debug(f"Plate detected with detector confidence {best_conf:.2f}")
     return best_crop
+    '''
+#detect_plate with Monte Carlo Dropout for more robust detection under challenging conditions (e.g. low light, motion blur)
+def detect_plate(frame: np.ndarray, n_passes: int = 10, 
+                             consistency_threshold: float = 0.7) -> np.ndarray | None:
+    """
+    Monte Carlo Dropout: run N stochastic forward passes.
+    Only accept a detection if it appears in >= threshold fraction of passes.
+    High specificity — rejects uncertain/noisy detections.
+    """
+    detector = _get_detector()
+    
+    # Enable dropout layers at inference time
+    for module in detector.model.modules():
+        if isinstance(module, torch.nn.Dropout):
+            module.train()  # keeps dropout active
 
+    detection_counts = {}  # box_key -> count
+
+    for _ in range(n_passes):
+        results = detector(frame, verbose=False)[0]
+        for box in results.boxes.data.tolist():
+            x1, y1, x2, y2, score, cls = box
+            if score < 0.5:  # filter out low-confidence detections early
+                continue
+            # Quantize coordinates to group nearby boxes
+            key = (round(x1 / 20), round(y1 / 20), 
+                   round(x2 / 20), round(y2 / 20))
+            detection_counts[key] = detection_counts.get(key, 0) + 1
+
+    # Only keep boxes seen in >= threshold of passes
+    stable_boxes = {
+        k: v for k, v in detection_counts.items() 
+        if v / n_passes >= consistency_threshold
+    }
+
+    if not stable_boxes:
+        return None
+
+    # Use the most consistent detection
+    best_key = max(stable_boxes, key=stable_boxes.get)
+    x1, y1, x2, y2 = [coord * 20 for coord in best_key]
+    h,w = frame.shape[:2]
+    x1 = max(0, min(w,int(x1)))
+    y1 = max(0, min(h,int(y1)))
+    x2 = max(0, min(w,int(x2)))
+    y2 = max(0, min(h,int(y2)))
+    if x2<=x1 or y2<=y1:
+        return None
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 64, 255, cv2.THRESH_BINARY_INV)
+    logger.debug(f"Plate detected with detector confidence {stable_boxes[best_key]/n_passes:.2f}")
+    return thresh
 
 '''def _complies_format(text: str) -> bool:
     """
@@ -157,21 +217,50 @@ def _format_plate(text: str) -> str:
     return result
 
 
-def read_plate(plate_crop: np.ndarray) -> tuple[str | None, float]:
+def read_plate(plate_crop: np.ndarray, n_variants: int = 5) -> tuple[str | None, float]:
     """
-    Run EasyOCR on the plate crop, validate and correct the text.
-
-    Returns:
-        (plate_text, confidence) or (None, 0.0) if no valid reading found.
+    Generate N augmented variants of the crop, run OCR on each,
+    return the plate text only if a majority agree.
     """
     reader = _get_reader()
-    detections = reader.readtext(plate_crop)
+    votes: dict[str, list[float]] = {}
 
-    for (_, text, score) in detections:
-        text = text.upper().replace(" ", "").replace("-", "")
-        if _complies_format(text):
-            formatted = _format_plate(text)
-            logger.debug(f"Valid plate: {formatted} (score={score:.2f})")
-            return formatted, score
+    augmentations = [
+        lambda img: img,                                          # original
+        lambda img: cv2.GaussianBlur(img, (3, 3), 0),           # blur
+        lambda img: cv2.resize(img, None, fx=1.5, fy=1.5),      # upscale
+        lambda img: cv2.equalizeHist(img),                       # equalize
+        lambda img: cv2.dilate(img, np.ones((2,2))),             # dilate
+    ]
 
-    return None, 0.0
+    # Randomly sample n_variants augmentations
+    chosen = random.sample(augmentations, min(n_variants, len(augmentations)))
+
+    for aug in chosen:
+        try:
+            variant = aug(plate_crop)
+            detections = reader.readtext(variant)
+            for (_, text, score) in detections:
+                text = text.upper().replace(" ", "").replace("-", "")
+                if _complies_format(text):
+                    formatted = _format_plate(text)
+                    votes.setdefault(formatted, []).append(score)
+        except Exception:
+            continue
+
+    if not votes:
+        return None, 0.0
+
+    # Require majority vote for high specificity
+    majority = n_variants // 2 + 1
+    confident_plates = {
+        plate: scores for plate, scores in votes.items()
+        if len(scores) >= majority
+    }
+
+    if not confident_plates:
+        return None, 0.0
+
+    best = max(confident_plates, key=lambda p: sum(confident_plates[p]))
+    avg_conf = sum(confident_plates[best]) / len(confident_plates[best])
+    return best, avg_conf
