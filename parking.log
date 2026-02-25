@@ -16,3 +16,7 @@
 2026-02-23 18:56:40,219 [INFO] Download complete.
 2026-02-23 19:01:57,065 [INFO] Connecting to IP camera: rtsp://admin:pass@192.168.1.100:554/stream
 >>>>>>> a8f2e97 (new mistake)
+2026-02-25 06:56:52,753 [INFO] Opening webcam index: 0
+2026-02-25 06:56:55,731 [INFO] Started [ENTRY] camera. Press 'q' to quit.
+2026-02-25 06:56:56,143 [INFO] Loading license plate detector model...
+2026-02-25 06:57:07,007 [INFO] Loading EasyOCR reader...
