@@ -1,0 +1,18 @@
+<<<<<<< HEAD
+2026-02-23 15:36:21,601 [INFO] Opening webcam index: 0
+2026-02-23 15:57:10,544 [INFO] Opening webcam index: 0
+2026-02-23 16:02:12,521 [INFO] Opening webcam index: 0
+2026-02-23 16:02:12,665 [INFO] Started [ENTRY] camera. Press 'q' to quit.
+2026-02-23 16:02:22,771 [WARNING] Failed to read frame. Retrying in 2s...
+2026-02-23 16:02:24,774 [INFO] Opening webcam index: 0
+=======
+2026-02-23 18:56:00,346 [INFO] Opening webcam index: 0
+2026-02-23 18:56:03,903 [INFO] Started [ENTRY] camera. Press 'q' to quit.
+2026-02-23 18:56:04,356 [INFO] Loading license plate detector model...
+2026-02-23 18:56:21,703 [INFO] Loading EasyOCR reader...
+2026-02-23 18:56:21,711 [WARNING] Downloading detection model, please wait. This may take several minutes depending upon your network connection.
+2026-02-23 18:56:38,574 [INFO] Download complete
+2026-02-23 18:56:38,574 [WARNING] Downloading recognition model, please wait. This may take several minutes depending upon your network connection.
+2026-02-23 18:56:40,219 [INFO] Download complete.
+2026-02-23 19:01:57,065 [INFO] Connecting to IP camera: rtsp://admin:pass@192.168.1.100:554/stream
+>>>>>>> a8f2e97 (new mistake)
