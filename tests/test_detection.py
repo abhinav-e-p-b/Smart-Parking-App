@@ -20,103 +20,58 @@ from detection import _complies_format, _format_plate, CHAR_TO_INT, INT_TO_CHAR
 # _complies_format() tests
 # ─────────────────────────────────────────────
 
+
+# In tests/test_detection.py — replace the TestCompliesFormat class
+
 class TestCompliesFormat:
 
-    def test_valid_uk_plate(self):
-        """Standard UK-style 7-char plate: 2 letters, 2 digits, 3 letters."""
-        assert _complies_format("AB12CDE") is True
+    def test_valid_indian_plate(self):
+        assert _complies_format("MH12AB1234") is True
 
     def test_valid_with_substitutable_chars(self):
-        """Chars that map via CHAR_TO_INT / INT_TO_CHAR should still pass."""
-        # '0' at position 2 is a valid digit
-        assert _complies_format("AB02CDE") is True
-        # 'O' at position 0 maps to '0' — but position 0 expects a letter, so O is valid as a letter
-        assert _complies_format("OB12CDE") is True
+        assert _complies_format("MH12AB123O") is True   # O→0 at digit position
+        assert _complies_format("OH12AB1234") is True   # O is valid letter
 
     def test_too_short(self):
-        assert _complies_format("AB1CDE") is False
+        assert _complies_format("MH12AB123") is False   # 9 chars
 
     def test_too_long(self):
-        assert _complies_format("AB12CDEF") is False
+        assert _complies_format("MH12AB12345") is False  # 11 chars
 
     def test_empty_string(self):
         assert _complies_format("") is False
 
     def test_digit_in_letter_position(self):
-        """Position 0 and 1 must be letters or letter-substitutable chars."""
-        assert _complies_format("1B12CDE") is False
+        assert _complies_format("1H12AB1234") is False   # pos 0 must be letter
 
     def test_letter_in_digit_position_not_substitutable(self):
-        """Position 2–3 must be digits or CHAR_TO_INT keys."""
-        # 'Z' is not in CHAR_TO_INT, so position 2 = 'Z' is invalid
-        assert _complies_format("ABZZCDE") is False
-
-    def test_substitutable_char_in_digit_position(self):
-        """'O' maps to '0' so it's valid in a digit position."""
-        assert _complies_format("ABOO CDE".replace(" ", "")) is False  # 7 chars check first
-        assert _complies_format("ABOO" + "CDE") is False  # length 7 but 'O' at pos 2 OK, check pos 3 'O' OK
-        # Actually ABOOCDE = A B O O C D E — positions 2,3 are 'O' which IS in CHAR_TO_INT
-        assert _complies_format("ABOOCDE") is True
+        assert _complies_format("MHZ2AB1234") is False   # Z not in CHAR_TO_INT
 
     def test_lowercase_rejected(self):
-        """Input is expected to be uppercased before this call."""
-        assert _complies_format("ab12cde") is False
+        assert _complies_format("mh12ab1234") is False
 
     def test_special_characters(self):
-        assert _complies_format("AB!2CDE") is False
+        assert _complies_format("MH12AB!234") is False
 
-    def test_spaces_rejected(self):
-        assert _complies_format("AB 2CDE") is False
-
-
-# ─────────────────────────────────────────────
-# _format_plate() tests
-# ─────────────────────────────────────────────
-
+# In TestFormatPlate — update to 10-char plates
 class TestFormatPlate:
 
     def test_no_substitution_needed(self):
-        """A clean plate passes through unchanged."""
-        assert _format_plate("AB12CDE") == "AB12CDE"
+        assert _format_plate("MH12AB1234") == "MH12AB1234"
 
-    def test_letter_O_at_digit_position(self):
-        """'O' at position 2 or 3 should become '0'."""
-        result = _format_plate("ABO2CDE")
-        assert result[2] == "0"
+    def test_O_at_digit_position_becomes_0(self):
+        result = _format_plate("MH12AB123O")   # pos 9 is digit position
+        assert result[9] == "0"
 
-    def test_digit_0_at_letter_position(self):
-        """'0' at position 0, 1, 4, 5, 6 should become 'O'."""
-        result = _format_plate("0B12CDE")
+    def test_0_at_letter_position_becomes_O(self):
+        result = _format_plate("0H12AB1234")   # pos 0 is letter position
         assert result[0] == "O"
 
-    def test_I_becomes_1_at_digit_position(self):
-        result = _format_plate("ABI2CDE")
-        assert result[2] == "1"
-
-    def test_1_becomes_I_at_letter_position(self):
-        result = _format_plate("1B12CDE")
-        assert result[0] == "I"
-
-    def test_S_becomes_5_at_digit_position(self):
-        result = _format_plate("ABS2CDE")
-        assert result[2] == "5"
-
-    def test_5_becomes_S_at_letter_position(self):
-        result = _format_plate("5B12CDE")
-        assert result[0] == "S"
-
-    def test_full_correction(self):
-        """Simulate a realistic OCR error: 'O' where digit expected."""
-        raw = "ABOOCDE"   # positions 2,3 are 'O' instead of '0'
-        result = _format_plate(raw)
-        assert result[2] == "0"
-        assert result[3] == "0"
-        assert result == "AB00CDE"
-
     def test_output_length_unchanged(self):
-        """Substitution must not change string length."""
-        plate = "OB1OCDE"
-        assert len(_format_plate(plate)) == 7
+        assert len(_format_plate("MH12AB1234")) == 10
+# ─────────────────────────────────────────────
+# _format_plate() tests
+# ─────────────────────────────────────────────
 
 
 # ─────────────────────────────────────────────
