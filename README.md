@@ -1,54 +1,189 @@
 # 🅿 Real-Time Parking Management System
 ### Automatic Number Plate Recognition — Production-Grade Entry & Exit Logging
 
-This system converts a YOLOv8 license plate detector into a live, gate-ready parking management solution. It reads a camera feed in real time, detects and OCR-reads license plates, and logs structured entry and exit records to a SQLite database — with no video files, no CSV interpolation, and no post-processing required.
+A computer vision–based parking management solution that uses **YOLOv8** for license plate detection and **EasyOCR** for text recognition. The system reads live camera feeds, identifies vehicles by their number plates, and maintains a structured log of entries and exits in a **SQLite** database — with no pre-recorded video, no CSV post-processing, and no manual intervention required.
 
 ---
 
 ## Table of Contents
 
 1. [Project Overview](#1-project-overview)
-2. [File Structure](#2-file-structure)
-3. [How It Works](#3-how-it-works)
-4. [Requirements](#4-requirements)
-5. [Installation](#5-installation)
-6. [Configuration](#6-configuration)
-7. [Running the System](#7-running-the-system)
-8. [Admin CLI](#8-admin-cli)
-9. [Database Schema](#9-database-schema)
-10. [Module Reference](#10-module-reference)
-11. [Testing](#11-testing)
-12. [Camera Setup Guide](#12-camera-setup-guide)
-13. [Adapting the Plate Format](#13-adapting-the-plate-format)
-14. [Troubleshooting](#14-troubleshooting)
-15. [Next-Level Upgrades](#15-next-level-upgrades)
+2. [System Architecture](#2-system-architecture)
+3. [How It Works — Detailed Pipeline](#3-how-it-works--detailed-pipeline)
+4. [File Structure](#4-file-structure)
+5. [pip Packages Used](#5-pip-packages-used)
+6. [Installation & Setup](#6-installation--setup)
+7. [Configuration](#7-configuration)
+8. [Running the System](#8-running-the-system)
+9. [Admin CLI Reference](#9-admin-cli-reference)
+10. [Database Schema](#10-database-schema)
+11. [Module Reference](#11-module-reference)
+12. [Testing](#12-testing)
+13. [Camera Setup Guide](#13-camera-setup-guide)
+14. [Adapting for Different Plate Formats](#14-adapting-for-different-plate-formats)
+15. [Troubleshooting](#15-troubleshooting)
+16. [Real-World Applications](#16-real-world-applications)
+17. [Future Improvements & Roadmap](#17-future-improvements--roadmap)
 
 ---
 
 ## 1. Project Overview
 
-### What this system does
+### What the system does
 
 - Connects to a **live webcam or IP CCTV camera** (RTSP stream)
-- Detects license plates in every video frame using a **YOLOv8 model**
-- Reads the plate text using **EasyOCR** and validates it against a configurable format
-- Logs an **entry timestamp** when a vehicle arrives at the entry gate
-- Logs an **exit timestamp** and computes a **duration** when the same vehicle leaves
-- Prevents duplicate logs using a **debounce timer** (configurable, default 10 seconds)
-- Filters out low-quality readings using a **confidence threshold** (default 0.60)
-- Stores all records in a **SQLite database** that survives reboots and is queryable at any time
-- Provides an **operator CLI** (`admin.py`) for status checks, manual overrides, and CSV exports
+- Detects license plates in every video frame using **YOLOv8** (fine-tuned on Indian plates)
+- Reads the plate text using **EasyOCR** with multi-augmentation ensemble voting
+- Validates plate text against configurable format rules (Indian 10-char default)
+- Applies position-aware **character correction** (e.g., O↔0, I↔1, S↔5) to handle OCR misreads
+- Logs an **entry timestamp** when a vehicle is detected at the entry gate
+- Logs an **exit timestamp** and computes a **parking duration** when the vehicle departs
+- Prevents duplicate logs using an in-memory **debounce timer**
+- Filters noisy readings using a **confidence threshold** (default 0.60)
+- Uses a **temporal consistency filter** — only confirms a plate after it appears across multiple frames
+- Stores all data in **SQLite**, which survives process restarts and is queryable at any time
+- Provides an **operator CLI** (`admin.py`) for live status checks, manual overrides, and CSV exports
 
-### What this system does NOT do (by design)
+### What the system does NOT do (by design)
 
-- It does not process pre-recorded video files
-- It does not track vehicle trajectories across frames (SORT tracking was removed — parking gates need plate identity, not movement paths)
-- It does not require a GPU (CPU inference is fully supported for low-to-medium traffic)
-- It does not save output video
+- Does not process pre-recorded video files — designed for live gate operation
+- Does not perform multi-object trajectory tracking — plate identity at a gate is all that's needed
+- Does not require a GPU (CPU inference fully supported for low-to-moderate traffic)
+- Does not save or record output video
+- Does not handle payment processing or physical gate control out-of-the-box (upgrade paths documented below)
 
 ---
 
-## 2. File Structure
+## 2. System Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                         PHYSICAL LAYER                               │
+│                                                                      │
+│   [Entry Camera]                          [Exit Camera]              │
+│   Webcam / IP CCTV                        Webcam / IP CCTV           │
+└─────────────┬─────────────────────────────────────┬──────────────────┘
+              │ cv2.VideoCapture                     │ cv2.VideoCapture
+              ▼                                     ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                       DETECTION LAYER (detection.py)                 │
+│                                                                      │
+│   ┌─────────────────────────────────────┐                           │
+│   │  detect_plate(frame)                │                           │
+│   │  ─ YOLOv8 inference (5 passes)      │                           │
+│   │  ─ Brightness/contrast jitter       │                           │
+│   │  ─ Consistency threshold filter     │                           │
+│   │  ─ Returns preprocessed crop        │                           │
+│   └──────────────────┬──────────────────┘                           │
+│                      │                                               │
+│   ┌──────────────────▼──────────────────┐                           │
+│   │  read_plate(crop)                   │                           │
+│   │  ─ EasyOCR (7 augmentation modes)   │                           │
+│   │  ─ Majority vote across variants    │                           │
+│   │  ─ Format validation                │                           │
+│   │  ─ Character correction             │                           │
+│   │  Returns: (plate_text, confidence)  │                           │
+│   └──────────────────┬──────────────────┘                           │
+└──────────────────────┼───────────────────────────────────────────────┘
+                       │
+┌──────────────────────▼───────────────────────────────────────────────┐
+│                      LOGIC LAYER (camera.py)                         │
+│                                                                      │
+│   TemporalConsistencyFilter   →  plate stable across N frames?       │
+│   is_debounced()              →  seen within last 10 seconds?        │
+│   confidence >= threshold     →  reading reliable enough?            │
+│                                                                      │
+│   camera_mode == "entry"      →  mark_entry(plate)                   │
+│   camera_mode == "exit"       →  vehicle_inside? → mark_exit(plate)  │
+└──────────────────────┬───────────────────────────────────────────────┘
+                       │
+┌──────────────────────▼───────────────────────────────────────────────┐
+│                   PERSISTENCE LAYER (database.py)                    │
+│                                                                      │
+│   SQLite — parking.db                                                │
+│   ┌────────────────────────────────────────────────────────────┐    │
+│   │ parking_log                                                 │    │
+│   │  id | plate_number | entry_time | exit_time | duration_sec │    │
+│   └────────────────────────────────────────────────────────────┘    │
+└──────────────────────┬───────────────────────────────────────────────┘
+                       │
+┌──────────────────────▼───────────────────────────────────────────────┐
+│                    ADMIN LAYER (admin.py)                            │
+│                                                                      │
+│   status | stats | export | manual-exit                              │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Component interaction summary
+
+| Component | Role | Talks to |
+|---|---|---|
+| `camera.py` | Orchestrates the live loop | `detection.py`, `database.py` |
+| `detection.py` | Runs YOLO + EasyOCR, corrects text | `ultralytics`, `easyocr`, `cv2` |
+| `database.py` | All SQLite reads and writes | `sqlite3` |
+| `config.py` | Central settings, reads env vars | `os` |
+| `admin.py` | Operator CLI | `database.py`, `sqlite3` |
+
+---
+
+## 3. How It Works — Detailed Pipeline
+
+### Step-by-step frame processing
+
+```
+Live Camera Frame
+       │
+       ▼
+detect_plate(frame, n_passes=5)
+  ├─ Run YOLOv8 inference 5× (with brightness/contrast jitter on passes 2–5)
+  ├─ Group nearby bounding boxes (quantise to 20px grid)
+  ├─ Keep only boxes seen in ≥ 60% of passes (temporal consistency)
+  ├─ Average coordinates of stable boxes
+  ├─ Crop the plate region from the frame
+  └─ Preprocess: grayscale → upscale (if small) → adaptive threshold
+       │
+       │ returns preprocessed crop, or None
+       ▼
+read_plate(crop, n_variants=5)
+  ├─ Apply 5 random augmentations from: original, blur, upscale,
+  │   histogram equalise, dilate, erode, median blur
+  ├─ Run EasyOCR on each augmented variant
+  ├─ Strip spaces/hyphens, uppercase
+  ├─ Validate against Indian plate patterns (regex)
+  ├─ Apply character correction (position-aware: letters vs digits)
+  ├─ Collect votes: plate_text → [confidence1, confidence2, ...]
+  ├─ Require majority of variants to agree (≥ floor(n/2)+1)
+  └─ Returns (plate_text, avg_confidence) or (None, 0.0)
+       │
+       ▼
+High-Specificity Gate (camera.py)
+  ├─ confidence < 0.60  →  discard
+  ├─ TemporalConsistencyFilter: plate must appear in ≥ 3 of last 5 frames
+  ├─ is_debounced(): same plate within last 10s  →  discard
+       │
+       ▼
+Decision
+  ├─ mode == "entry"  →  mark_entry(plate)
+  └─ mode == "exit"
+        ├─ vehicle_inside(plate) == True  →  mark_exit(plate)
+        └─ vehicle_inside(plate) == False →  log warning (orphan exit)
+```
+
+### Debounce logic
+
+When a vehicle stops at a gate, the camera may read the same plate dozens of times per second. `recent_detections` is an in-memory dict that records the last successful detection time for each plate. Any subsequent reading within `DEBOUNCE_SECONDS` (default 10) is silently ignored. The dict resets on process restart — this is intentional, as a restart implies a system disruption, not a repeat visit.
+
+### Temporal consistency filter
+
+`TemporalConsistencyFilter` maintains a sliding window (default: 5 frames) for each plate seen. A plate is only passed to the database layer if it accumulated at least `min_hits` (default: 3) detections in that window. This eliminates ghost detections caused by reflections, shadows, or passing pedestrians.
+
+### Duplicate entry protection
+
+Even if debounce and the temporal filter both fail (e.g. after a hard restart), the database has a second line of defence: `mark_entry()` calls `vehicle_inside()` before inserting. If an open entry already exists for that plate, the insert is silently skipped and a warning is logged.
+
+---
+
+## 4. File Structure
 
 ```
 parking_system/
@@ -58,9 +193,12 @@ parking_system/
 ├── database.py                # SQLite wrapper — mark_entry(), mark_exit(), etc.
 ├── config.py                  # All tunable settings in one place
 ├── admin.py                   # Operator CLI: status, export, manual exit, stats
+├── finetune.py                # YOLOv8 fine-tuning script for Indian plate dataset
+├── audit_test.py              # Pre-training dataset audit (image/label counts)
+├── data_download.py           # Roboflow dataset download script
 ├── requirements.txt           # Python dependencies
 │
-├── license_plate_detector.pt  # Your trained YOLOv8 plate model (not included)
+├── best.pt                    # Fine-tuned YOLOv8 model (generated by finetune.py)
 ├── parking.db                 # SQLite database — auto-created on first run
 ├── parking.log                # Log file — auto-created on first run
 │
@@ -70,156 +208,189 @@ parking_system/
     └── test_database.py       # Unit tests for all database operations
 ```
 
-### File roles at a glance
+---
 
-| File | Responsibility | Imports |
+## 5. pip Packages Used
+
+Install all dependencies with:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Core packages
+
+| Package | Version | Purpose |
 |---|---|---|
-| `camera.py` | Opens camera, runs detection loop, calls mark_entry/mark_exit | `detection`, `database` |
-| `detection.py` | Wraps YOLOv8 and EasyOCR, validates and corrects plate text | `ultralytics`, `easyocr`, `cv2` |
-| `database.py` | All SQLite reads and writes, CSV export | `sqlite3`, `csv` |
-| `config.py` | Central config, reads from environment variables | `os` |
-| `admin.py` | CLI tool for operators, calls database functions directly | `database`, `sqlite3` |
+| `ultralytics` | ≥ 8.0 | YOLOv8 model loading, inference, and fine-tuning |
+| `easyocr` | ≥ 1.7 | OCR engine — reads text from license plate crops |
+| `opencv-python` | ≥ 4.8 | Camera capture, image preprocessing (resize, threshold, blur) |
+| `torch` | ≥ 2.0 | Deep learning backend for both YOLOv8 and EasyOCR |
+| `torchvision` | ≥ 0.15 | Image transforms used internally by torch models |
+| `numpy` | ≥ 1.24 | Array operations on video frames |
+| `pyyaml` | ≥ 6.0 | Parse `data.yaml` for dataset configuration |
+| `roboflow` | ≥ 1.0 | Download training datasets from Roboflow universe |
+| `python-dotenv` | ≥ 1.0 | Load configuration from `.env` files |
 
----
+### Standard library modules used (no installation needed)
 
-## 3. How It Works
+| Module | Used in | Purpose |
+|---|---|---|
+| `sqlite3` | `database.py`, `admin.py` | SQLite database access |
+| `csv` | `database.py` | Export parking log to CSV |
+| `logging` | `camera.py`, `detection.py`, `database.py` | Structured log output |
+| `argparse` | `camera.py`, `admin.py` | Command-line argument parsing |
+| `datetime` | `database.py` | ISO-8601 UTC timestamp generation |
+| `pathlib` | `database.py`, `finetune.py` | Path manipulation |
+| `os` | `config.py` | Read environment variables |
+| `re` | `detection.py` | Regex for plate format validation |
+| `collections` | `camera.py` | `defaultdict`, `deque` for temporal filter |
+| `time` | `camera.py` | Debounce timer |
+| `random` | `detection.py` | Random augmentation sampling |
+| `string` | `detection.py` | Character utilities |
 
-### Detection pipeline (per frame)
-
-```
-Camera Frame
-    │
-    ▼
-detect_plate(frame)          ← YOLOv8 finds the highest-confidence plate region
-    │                           Returns grayscale + threshold-processed crop, or None
-    │ None → skip frame
-    ▼
-read_plate(crop)             ← EasyOCR reads text from crop
-    │                           Validates against plate format (UK 7-char default)
-    │                           Applies character correction (O↔0, I↔1, S↔5, etc.)
-    │                           Returns (plate_text, confidence) or (None, 0.0)
-    │
-    ├── confidence < 0.60 → discard (too noisy)
-    ├── plate seen < 10s ago → discard (debounce)
-    │
-    ▼
-camera_mode == "entry"?
-    ├── Yes → mark_entry(plate)   ← INSERT row with entry_time, exit_time = NULL
-    └── No  → vehicle_inside(plate)?
-                ├── Yes → mark_exit(plate)    ← UPDATE row: exit_time, duration_sec
-                └── No  → log warning (orphan exit scan)
-```
-
-### Debounce logic
-
-When a vehicle sits at a gate, the camera may read the same plate dozens of times per second. The debounce system records the timestamp of each successful detection in a `recent_detections` dict. Any subsequent reading of the same plate within `DEBOUNCE_SECONDS` is silently ignored. The dict is in-memory only — it resets when the process restarts, which is intentional.
-
-### Duplicate entry protection
-
-`mark_entry()` first calls `vehicle_inside()` before inserting. If an open entry already exists for that plate (i.e. `exit_time IS NULL`), the insert is skipped and a warning is logged. This means even if debounce fails (e.g. after a restart), the database stays clean.
-
----
-
-## 4. Requirements
-
-### Software
-
-- Python 3.10 or higher
-- CUDA 12.1 (optional, for GPU acceleration)
-
-### Python packages
-
-All listed in `requirements.txt`. Key dependencies:
+### Development / testing packages
 
 | Package | Purpose |
 |---|---|
-| `ultralytics` | YOLOv8 inference for plate detection |
-| `easyocr` | OCR engine for reading plate text |
-| `opencv-python` | Camera access and image preprocessing |
-| `torch` / `torchvision` | Deep learning backend for both YOLO and EasyOCR |
-| `numpy` | Array operations for frame handling |
-| `python-dotenv` | Optional: load config from `.env` file |
-
-### Hardware
-
-| Use Case | Minimum Spec |
-|---|---|
-| Development / testing | Any modern laptop with CPU |
-| Single gate, moderate traffic | Intel i5 / AMD Ryzen 5, 8 GB RAM |
-| Multiple gates or high throughput | NVIDIA GPU (GTX 1660+), 16 GB RAM |
-| Edge / embedded deployment | NVIDIA Jetson Orin Nano 8 GB |
-
-### Model file
-
-You must supply `license_plate_detector.pt` — a YOLOv8 model trained on license plate images. A compatible model trained on the [Roboflow License Plate Recognition dataset](https://universe.roboflow.com/roboflow-universe-projects/license-plate-recognition-rxg4e/dataset/4) can be downloaded from the original project resources. Place the `.pt` file in the root of `parking_system/`.
+| `pytest` | Test runner for all unit tests |
 
 ---
 
-## 5. Installation
+## 6. Installation & Setup
 
-### Step 1 — Clone or copy the project
+### Prerequisites
+
+- Python 3.10 or higher
+- A webcam (for development/testing) or an IP CCTV camera with RTSP output
+- A fine-tuned `best.pt` YOLOv8 model (see Step 5 below)
+- Optional: NVIDIA GPU with CUDA 12.1 (for faster inference)
+
+---
+
+### Step 1 — Clone the project
 
 ```bash
 git clone <your-repo-url> parking_system
 cd parking_system
 ```
 
-### Step 2 — Create a Python environment
+---
 
+### Step 2 — Create a Python virtual environment
+
+**Using conda (recommended):**
 ```bash
-# Using conda (recommended)
 conda create --prefix ./env python=3.10 -y
 conda activate ./env
+```
 
-# Or using venv
+**Using venv:**
+```bash
 python3.10 -m venv env
 source env/bin/activate        # Linux / macOS
 env\Scripts\activate           # Windows
 ```
 
-### Step 3 — Install dependencies
+---
 
-**CPU only (works on any machine):**
+### Step 3 — Install Python dependencies
+
+**CPU-only (works on any machine):**
 ```bash
 pip install -r requirements.txt
 ```
 
-**GPU (CUDA 12.1) — faster inference for high-traffic deployments:**
+**GPU with CUDA 12.1 (recommended for production):**
 ```bash
 pip install -r requirements.txt
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ```
 
-**GPU (CUDA 11.8):**
+**GPU with CUDA 11.8:**
 ```bash
+pip install -r requirements.txt
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-```
-
-### Step 4 — Add your model
-
-```bash
-# Copy your trained model into the project root
-cp /path/to/license_plate_detector.pt .
-```
-
-### Step 5 — Verify everything works
-
-```bash
-# Check camera connectivity (webcam)
-python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera OK:', cap.isOpened()); cap.release()"
-
-# Check YOLO model loads
-python -c "from ultralytics import YOLO; m = YOLO('license_plate_detector.pt'); print('Model OK')"
-
-# Check database initialises
-python -c "from database import init_db; init_db(); print('Database OK')"
 ```
 
 ---
 
-## 6. Configuration
+### Step 4 — Download the training dataset (for fine-tuning only)
 
-All settings are centralised in `config.py`. Every value can be overridden with an environment variable, making the system Docker- and `.env`-friendly.
+If you want to fine-tune the model yourself, run:
+
+```bash
+python data_download.py
+```
+
+This downloads the Indian number plate dataset from Roboflow into `number-plate-1/`. To use a different dataset, edit the `api_key`, workspace, and project name inside `data_download.py`.
+
+---
+
+### Step 5 — Audit the dataset
+
+Before training, verify that all images have matching label files:
+
+```bash
+python audit_test.py
+```
+
+Each split (`train`, `val`, `test`) should show:
+```
+✅ Perfect match — ready to train
+✅ Label format looks valid (YOLO normalized coords)
+```
+
+Fix any mismatches before proceeding.
+
+---
+
+### Step 6 — Fine-tune the YOLOv8 model
+
+```bash
+python finetune.py
+```
+
+This trains YOLOv8s on the Indian number plate dataset for 100 epochs. Key settings:
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `BASE_MODEL` | `yolov8s.pt` | Downloads ~22 MB automatically |
+| `epochs` | 100 | Increase for better accuracy |
+| `batch` | 8 | Safe for 8 GB RAM without GPU; increase to 16–32 on Colab |
+| `imgsz` | 640 | Input resolution |
+| `freeze` | 10 | Freezes backbone; set to 0 to train all layers |
+| `fliplr` | 0.0 | Horizontal flip disabled — plates are directional |
+
+After training, the best weights are saved to `runs/finetune/indian_plates/weights/best.pt`. Copy this to the project root:
+
+```bash
+cp runs/finetune/indian_plates/weights/best.pt best.pt
+```
+
+---
+
+### Step 7 — Verify the installation
+
+```bash
+# Check camera connectivity
+python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera OK:', cap.isOpened()); cap.release()"
+
+# Check model loads
+python -c "from ultralytics import YOLO; m = YOLO('best.pt'); print('Model OK')"
+
+# Check database initialises
+python -c "from database import init_db; init_db(); print('Database OK')"
+
+# Check CUDA (optional)
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+```
+
+---
+
+## 7. Configuration
+
+All settings live in `config.py`. Every value can be overridden with an environment variable, making the system Docker- and `.env`-friendly.
 
 ```python
 # config.py
@@ -227,9 +398,9 @@ All settings are centralised in `config.py`. Every value can be overridden with 
 ENTRY_CAMERA_SOURCE = os.getenv("ENTRY_CAMERA", "0")       # webcam index or RTSP URL
 EXIT_CAMERA_SOURCE  = os.getenv("EXIT_CAMERA",  "1")
 
-PLATE_MODEL_PATH     = os.getenv("PLATE_MODEL",   "license_plate_detector.pt")
-CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE", "0.60"))  # 0.0 – 1.0
-DEBOUNCE_SECONDS     = int(os.getenv("DEBOUNCE",    "10"))      # seconds
+PLATE_MODEL_PATH     = os.getenv("PLATE_MODEL",   "best.pt")
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE", "0.60"))
+DEBOUNCE_SECONDS     = int(os.getenv("DEBOUNCE",    "10"))
 
 DB_PATH   = os.getenv("DB_PATH",   "parking.db")
 LOG_FILE  = os.getenv("LOG_FILE",  "parking.log")
@@ -240,7 +411,7 @@ USE_GPU = os.getenv("USE_GPU", "true").lower() == "true"
 
 ### Using a `.env` file
 
-Create a `.env` file in the project root (never commit this to version control):
+Create `.env` in the project root (never commit this file to version control):
 
 ```dotenv
 ENTRY_CAMERA=rtsp://admin:yourpassword@192.168.1.100:554/stream1
@@ -262,22 +433,24 @@ load_dotenv()
 
 | Setting | Effect of increasing | Effect of decreasing |
 |---|---|---|
-| `CONFIDENCE_THRESHOLD` | Fewer false positives, may miss some valid plates | More readings accepted, risk of OCR noise entering DB |
-| `DEBOUNCE_SECONDS` | Safer against double-logging, less responsive to fast re-entry | May double-log if vehicle lingers at gate |
+| `CONFIDENCE_THRESHOLD` | Fewer false positives; may miss valid plates in poor light | More readings accepted; risk of OCR noise entering DB |
+| `DEBOUNCE_SECONDS` | Safer against double-logging; less responsive after very short re-entry | May double-log if vehicle lingers at gate |
+| `n_passes` (detect_plate) | More consistent detection; slower per frame | Faster; less robust against single-frame noise |
+| `min_hits` (TemporalConsistencyFilter) | Fewer false triggers; needs vehicle to be stationary longer | More responsive; may trigger on reflections |
 
-A confidence of **0.60–0.70** works well in good lighting. Drop to **0.50** if you're missing valid reads in low light. Raise to **0.75+** if you're getting garbage characters logged.
+A `CONFIDENCE` of **0.60–0.70** works well in good lighting. Drop to **0.50** for low light. Raise to **0.75+** if garbage characters are being logged.
 
 ---
 
-## 7. Running the System
+## 8. Running the System
 
-### Single camera (entry only)
+### Entry gate only (single camera)
 
 ```bash
 python camera.py --mode entry --source 0
 ```
 
-### Single camera (exit only) with a different webcam index
+### Exit gate only (separate webcam)
 
 ```bash
 python camera.py --mode exit --source 1
@@ -289,7 +462,7 @@ python camera.py --mode exit --source 1
 python camera.py --mode entry --source "rtsp://admin:password@192.168.1.100:554/stream1"
 ```
 
-### Two cameras simultaneously (separate terminals or processes)
+### Two cameras simultaneously (open separate terminals)
 
 **Terminal 1 — Entry gate:**
 ```bash
@@ -301,7 +474,7 @@ python camera.py --mode entry --source 0
 python camera.py --mode exit --source "rtsp://admin:password@192.168.1.101:554/stream1"
 ```
 
-Both processes share the same `parking.db` file safely. SQLite handles concurrent reads without issue. If you run many simultaneous camera processes (more than 4–6), enable WAL mode for better write concurrency:
+Both processes share the same `parking.db` safely. For more than 4–6 simultaneous processes, enable WAL mode:
 
 ```bash
 python -c "import sqlite3; conn = sqlite3.connect('parking.db'); conn.execute('PRAGMA journal_mode=WAL'); conn.close()"
@@ -309,9 +482,9 @@ python -c "import sqlite3; conn = sqlite3.connect('parking.db'); conn.execute('P
 
 ### Stopping the system
 
-Press **`q`** in the camera preview window, or send `CTRL+C` in the terminal. The camera is released cleanly either way.
+Press **`q`** in the camera preview window, or send **CTRL+C** in the terminal. The camera is released cleanly either way.
 
-### Running as a background service (Linux systemd)
+### Running as a Linux systemd service (auto-start on boot)
 
 Create `/etc/systemd/system/parking-entry.service`:
 
@@ -331,20 +504,20 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Then enable and start:
+Enable and start:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable parking-entry
 sudo systemctl start parking-entry
-sudo journalctl -u parking-entry -f   # follow logs
+sudo journalctl -u parking-entry -f    # follow live logs
 ```
 
 ---
 
-## 8. Admin CLI
+## 9. Admin CLI Reference
 
-`admin.py` provides an operator interface for managing the system without touching the database directly.
+`admin.py` is an operator interface for managing the system without touching the database directly.
 
 ### Check who is currently inside
 
@@ -355,9 +528,9 @@ python admin.py status
 Output:
 ```
 Plate           Entry Time (UTC)
-────────────────────────────────────────
-AB12CDE         2025-06-01T08:32:11+00:00
-XY99ZZZ         2025-06-01T09:14:55+00:00
+─────────────────────────────────────────────
+MH12AB1234      2025-06-01T08:32:11+00:00
+DL05CX9876      2025-06-01T09:14:55+00:00
 
 Total inside: 2
 ```
@@ -384,23 +557,21 @@ python admin.py export
 python admin.py export --output /path/to/report_june.csv
 ```
 
-The CSV has these columns: `plate_number`, `entry_time`, `exit_time`, `duration_sec`. Rows where `exit_time` is empty indicate vehicles still inside.
+CSV columns: `plate_number`, `entry_time`, `exit_time`, `duration_sec`. Rows with empty `exit_time` are vehicles still inside.
 
-### Manually force an exit record
+### Force a manual exit
 
-Use this when a vehicle exits without being detected (e.g. camera outage, barrier forced open):
+Use when a vehicle exits without being detected (camera outage, barrier forced open):
 
 ```bash
-python admin.py manual-exit AB12CDE
+python admin.py manual-exit MH12AB1234
 ```
-
-This calls `mark_exit()` directly, writing the current time as the exit timestamp.
 
 ---
 
-## 9. Database Schema
+## 10. Database Schema
 
-The database is a single SQLite file (`parking.db`) created automatically on first run. It contains one table:
+The database is a single SQLite file (`parking.db`) created automatically on first run.
 
 ```sql
 CREATE TABLE parking_log (
@@ -408,27 +579,21 @@ CREATE TABLE parking_log (
     plate_number  TEXT     NOT NULL,
     entry_time    TEXT     NOT NULL,   -- ISO-8601 UTC, e.g. 2025-06-01T08:32:11+00:00
     exit_time     TEXT,                -- NULL while vehicle is inside
-    duration_sec  INTEGER             -- seconds, populated atomically on exit
+    duration_sec  INTEGER             -- seconds from entry to exit
 );
 
 CREATE INDEX idx_plate ON parking_log (plate_number);
 ```
 
-### Querying the database directly
-
-You can open `parking.db` in [DB Browser for SQLite](https://sqlitebrowser.org/) (free GUI) or query it with the `sqlite3` command-line tool:
-
-```bash
-sqlite3 parking.db
-```
+### Useful SQL queries
 
 ```sql
--- All vehicles currently inside
+-- Vehicles currently inside
 SELECT plate_number, entry_time
 FROM parking_log
 WHERE exit_time IS NULL;
 
--- Total visits per plate, all time
+-- Total visits and average duration per plate
 SELECT plate_number, COUNT(*) as visits, AVG(duration_sec) as avg_sec
 FROM parking_log
 WHERE exit_time IS NOT NULL
@@ -446,61 +611,66 @@ WHERE entry_time < datetime('now', '-30 days');
 
 ### Design decisions
 
-- **ISO-8601 TEXT for timestamps** — portable across languages, human-readable in any DB browser, and lexicographically sortable without conversion.
-- **`duration_sec` computed at exit** — avoids re-computing duration on every report query; stored as an integer for simple arithmetic.
-- **No hard foreign keys** — keeps the schema flexible. Vehicle registration and payment tables can be added independently.
+- **ISO-8601 TEXT for timestamps** — portable across languages, human-readable in any DB viewer, and lexicographically sortable without conversion.
+- **`duration_sec` as INTEGER** — computed once at exit and stored; avoids repeated arithmetic on every query.
+- **No foreign keys** — keeps the schema simple; payment and membership tables can be added independently.
+- **Single table** — straightforward to query, export, and back up. Complex analytics can be handled downstream in pandas or a BI tool.
 
 ---
 
-## 10. Module Reference
+## 11. Module Reference
 
 ### `camera.py`
 
-The main process loop. Instantiate one process per physical camera.
+Main process loop — one process per physical camera.
 
 | Function | Signature | Description |
 |---|---|---|
-| `open_camera` | `(source) → cv2.VideoCapture` | Opens webcam (int index) or RTSP URL. Raises `RuntimeError` if connection fails. |
-| `is_debounced` | `(plate: str) → bool` | Returns `True` if this plate was processed within `DEBOUNCE_SECONDS`. Updates timestamp on first call. |
-| `run` | `(camera_mode: str, camera_source) → None` | Blocking main loop. Reads frames, detects plates, dispatches to `mark_entry` or `mark_exit`. Press `q` to exit. |
+| `open_camera` | `(source) → cv2.VideoCapture` | Opens webcam index or RTSP URL. Raises `RuntimeError` if it fails. |
+| `is_debounced` | `(plate: str) → bool` | Returns `True` if this plate was processed within `DEBOUNCE_SECONDS`. |
+| `TemporalConsistencyFilter` | class | Sliding window hit counter; `update()` returns `True` only when stable. |
+| `run` | `(camera_mode, camera_source) → None` | Blocking main loop. Reads frames, detects, dispatches. Press `q` to exit. |
 
 ---
 
 ### `detection.py`
 
-Wraps YOLOv8 and EasyOCR. Models are loaded lazily on first use and cached as module-level singletons — they are not reloaded on every frame.
+Wraps YOLOv8 and EasyOCR. Models are loaded lazily on first use and cached as module-level singletons.
 
 | Function | Signature | Description |
 |---|---|---|
-| `detect_plate` | `(frame: np.ndarray) → np.ndarray \| None` | Runs YOLOv8 on the frame. Returns the highest-confidence plate crop (grayscale + thresholded), or `None` if no plate found. |
-| `read_plate` | `(plate_crop: np.ndarray) → tuple[str \| None, float]` | Runs EasyOCR on the crop. Validates format and applies character correction. Returns `(plate_text, confidence)` or `(None, 0.0)`. |
-| `_complies_format` | `(text: str) → bool` | Internal. Validates the plate string against the configured format (UK 7-char by default). |
-| `_format_plate` | `(text: str) → str` | Internal. Applies `CHAR_TO_INT` and `INT_TO_CHAR` substitutions to correct common OCR misreads. |
+| `detect_plate` | `(frame, n_passes=5, consistency_threshold=0.6) → np.ndarray \| None` | Multi-pass YOLO detection with jitter. Returns preprocessed crop or `None`. |
+| `read_plate` | `(crop, n_variants=5) → tuple[str \| None, float]` | Multi-augmentation EasyOCR with majority voting. Returns `(text, confidence)`. |
+| `_complies_format` | `(text: str) → bool` | Validates against Indian plate regex patterns. |
+| `_format_plate` | `(text: str) → str` | Position-aware character correction. |
+| `_apply_corrections` | `(text: str) → str` | Internal: applies CHAR_TO_INT and INT_TO_CHAR at correct positions. |
+| `_clean_ocr_text` | `(text: str) → str` | Strips spaces, hyphens, dots; uppercases. |
+| `_preprocess_crop` | `(crop) → np.ndarray` | Grayscale, upscale, adaptive threshold for OCR. |
 
 **Character correction maps:**
 
 ```python
-CHAR_TO_INT = {'O': '0', 'I': '1', 'J': '3', 'A': '4', 'G': '6', 'S': '5'}
-# Applied at digit positions (2, 3) — converts look-alike letters to digits
+CHAR_TO_INT = {'O': '0', 'I': '1', 'J': '3', 'A': '4', 'G': '6', 'S': '5', 'B': '8', 'Z': '2'}
+# Applied at digit positions (2, 3, last 4) — converts look-alike letters to digits
 
-INT_TO_CHAR = {'0': 'O', '1': 'I', '3': 'J', '4': 'A', '6': 'G', '5': 'S'}
-# Applied at letter positions (0, 1, 4, 5, 6) — converts look-alike digits to letters
+INT_TO_CHAR = {'0': 'O', '1': 'I', '3': 'J', '4': 'A', '6': 'G', '5': 'S', '8': 'B', '2': 'Z'}
+# Applied at letter positions (0, 1, middle) — converts look-alike digits to letters
 ```
 
 ---
 
 ### `database.py`
 
-All database interactions go through this module. It is safe to import from multiple processes simultaneously.
+All database interactions go through this module. Safe to import from multiple processes simultaneously.
 
 | Function | Signature | Description |
 |---|---|---|
-| `init_db` | `() → None` | Creates the `parking_log` table and index if absent. Called automatically on import. |
-| `vehicle_inside` | `(plate: str) → bool` | Returns `True` if an open entry (no `exit_time`) exists for this plate. |
-| `mark_entry` | `(plate: str) → None` | Inserts a new entry row. Skips with a warning if the vehicle is already inside. |
-| `mark_exit` | `(plate: str) → None` | Finds the most recent open entry and updates it with `exit_time` and `duration_sec`. Safe to call if no entry exists (logs a warning, does not raise). |
-| `get_active_vehicles` | `() → list[dict]` | Returns a list of `{plate_number, entry_time}` dicts for all vehicles currently inside. |
-| `export_csv` | `(output_path: str) → None` | Writes the full `parking_log` table to a CSV file. |
+| `init_db` | `() → None` | Creates table and index if absent. Safe to call multiple times. |
+| `vehicle_inside` | `(plate: str) → bool` | True if an open entry (no exit_time) exists for this plate. |
+| `mark_entry` | `(plate: str) → None` | Inserts an entry row. Skips silently if already inside. |
+| `mark_exit` | `(plate: str) → None` | Updates the open entry with exit time and duration. Safe if no entry exists. |
+| `get_active_vehicles` | `() → list[dict]` | Returns all vehicles currently inside as dicts. |
+| `export_csv` | `(output_path: str) → None` | Writes full parking_log to a CSV file. |
 
 ---
 
@@ -511,97 +681,81 @@ CLI entry point. Run with `python admin.py <command>`.
 | Command | Arguments | Description |
 |---|---|---|
 | `status` | — | Print all vehicles currently inside |
-| `stats` | — | Print today's entry count, exit count, average duration, and occupancy |
+| `stats` | — | Today's entry count, exit count, average duration, occupancy |
 | `export` | `--output <path>` | Export full log to CSV (default: `parking_log.csv`) |
-| `manual-exit` | `<plate>` | Force an exit record for the given plate number |
+| `manual-exit` | `<plate>` | Force an exit record for the given plate |
 
 ---
 
-## 11. Testing
+## 12. Testing
 
-Tests use `pytest` and require no camera or model to run. The database tests use temporary SQLite files that are created fresh per test and cleaned up automatically.
-
-### Install pytest
-
-```bash
-pip install pytest
-```
+Tests use `pytest` and require no camera or model to run. Database tests use temporary SQLite files created fresh per test and cleaned up automatically.
 
 ### Run all tests
 
 ```bash
+pip install pytest
 pytest tests/ -v
 ```
 
-### Run a specific test file
+### Run specific files or tests
 
 ```bash
 pytest tests/test_database.py -v
 pytest tests/test_detection.py -v
-```
-
-### Run a specific test class or test
-
-```bash
-pytest tests/test_database.py::TestMarkExit -v
 pytest tests/test_database.py::TestMarkExit::test_sets_duration_sec -v
 ```
 
 ### Test coverage summary
 
-**`test_detection.py`** — 20 tests
+**`test_detection.py` — 20 tests**
 
-| Class | What is tested |
+| Test Class | What Is Tested |
 |---|---|
-| `TestCompliesFormat` | Valid plates, wrong length, invalid chars at each position, lowercase, spaces |
-| `TestFormatPlate` | Every substitution pair (O↔0, I↔1, S↔5, etc.) at letter and digit positions |
-| `TestMappingDicts` | That `CHAR_TO_INT` values are digits, `INT_TO_CHAR` values are letters, and the two maps are true inverses |
-| `TestDetectPlateContract` | That `detect_plate()` returns `None` on a blank frame (auto-skipped if model absent) and that `read_plate()` always returns a 2-tuple |
+| `TestCompliesFormat` | Valid plates, wrong length, invalid chars at each position, lowercase, special chars |
+| `TestFormatPlate` | Each substitution pair at letter and digit positions |
+| `TestMappingDicts` | CHAR_TO_INT values are digits, INT_TO_CHAR values are letters, maps are inverses |
+| `TestDetectPlateContract` | `detect_plate()` returns None on blank frame; `read_plate()` always returns a 2-tuple |
 
-**`test_database.py`** — 25 tests
+**`test_database.py` — 25 tests**
 
-| Class | What is tested |
+| Test Class | What Is Tested |
 |---|---|
-| `TestInitDb` | Table created correctly, idempotent on repeated calls |
+| `TestInitDb` | Table created correctly; idempotent on repeated calls |
 | `TestVehicleInside` | Unknown plate, after entry, after exit, case sensitivity |
-| `TestMarkEntry` | Row creation, `exit_time` is NULL, ISO timestamp with timezone, duplicate skip, re-entry after exit, multiple plates |
-| `TestMarkExit` | Sets `exit_time`, sets `duration_sec`, duration is non-negative, safe on unknown plate, only closes open entry |
-| `TestGetActiveVehicles` | Empty DB, single active vehicle, excludes exited vehicles, multiple active, result dict keys |
-| `TestExportCsv` | File is created, contains header and data row, empty DB produces header-only file |
-
-### Notes on model-dependent tests
-
-`TestDetectPlateContract.test_returns_none_on_blank_frame` checks whether the YOLOv8 model returns `None` on a black frame. It automatically skips with `pytest.skip` if `license_plate_detector.pt` is not present — so CI pipelines without the model file will not fail.
+| `TestMarkEntry` | Row creation, exit_time is NULL, ISO timestamp with timezone, duplicate skip, re-entry after exit |
+| `TestMarkExit` | Sets exit_time, sets duration_sec, duration non-negative, safe on unknown plate |
+| `TestGetActiveVehicles` | Empty DB, single/multiple active, excludes exited, result dict keys |
+| `TestExportCsv` | File created, header + data row present, empty DB produces header-only file |
 
 ---
 
-## 12. Camera Setup Guide
+## 13. Camera Setup Guide
 
 ### Physical placement
 
-- **Height:** Mount 1–2 metres above ground, angled 15–30° downward toward the plate zone. This minimises perspective distortion and keeps plate pixels large.
-- **Distance:** Position 2–4 metres from where the vehicle stops at the gate. The vehicle should be stationary (or nearly so) when detected — motion blur is the single biggest cause of OCR failure.
-- **One lane per camera:** Avoid wide-angle shots covering multiple lanes. Each camera should have exactly one lane in frame.
-- **Dedicated lanes:** Physically separate entry and exit lanes so each camera only ever sees vehicles moving in one direction.
+- Mount cameras **1–2 metres above ground**, angled **15–30° downward** toward the plate zone.
+- Position **2–4 metres** from where the vehicle stops — the vehicle should be stationary when detected.
+- **One lane per camera** — avoid wide-angle shots covering multiple lanes.
+- Use physically separate entry and exit lanes so each camera only sees one direction.
 
 ### Lighting
 
-- **IR illumination** is strongly recommended. Infrared LEDs illuminate plates without blinding drivers and work reliably at night. Many IP CCTV cameras include built-in IR emitters.
-- **Indoor/covered parking:** 500–800 lux of diffuse LED lighting is sufficient for reliable detection.
-- **Avoid backlighting:** Do not position the camera facing bright outdoor light or direct sun. Use anti-glare housing or a camera with wide dynamic range (WDR) if sun exposure is unavoidable.
-- **Contrast matters more than brightness:** A well-lit plate on a dark background reads better than a uniformly bright scene.
+- **IR illumination** is strongly recommended — IR LEDs illuminate plates without blinding drivers.
+- Indoor parking: 500–800 lux of diffuse LED lighting is sufficient.
+- Avoid backlighting or direct sun; use wide dynamic range (WDR) cameras if unavoidable.
+- Contrast matters more than raw brightness: a well-lit plate on a dark background reads better.
 
-### Camera hardware recommendations
+### Recommended cameras
 
 | Budget | Recommendation |
 |---|---|
 | Low | Any 1080p USB webcam with manual focus |
 | Medium | Hikvision DS-2CD2T47G2-L (4MP, built-in white light, IP67) |
-| High | Dedicated ANPR camera (Hikvision DS-2CD4A26FWD-IZHS or similar) with built-in IR and auto-exposure |
+| High | Dedicated ANPR camera (Hikvision DS-2CD4A26FWD-IZHS) with IR and auto-exposure |
+| Edge / embedded | NVIDIA Jetson Orin Nano 8 GB |
 
 ### RTSP URL formats
-
-Different manufacturers use different RTSP path formats. Common examples:
 
 ```bash
 # Hikvision
@@ -612,55 +766,41 @@ rtsp://admin:password@192.168.1.100:554/cam/realmonitor?channel=1&subtype=0
 
 # Generic
 rtsp://admin:password@192.168.1.100:554/stream1
-rtsp://admin:password@192.168.1.100:554/live/main
 ```
 
-If you are unsure of the URL, use [ONVIF Device Manager](https://sourceforge.net/projects/onvifdm/) (free) to discover the correct stream URI automatically.
+Use [ONVIF Device Manager](https://sourceforge.net/projects/onvifdm/) (free) to auto-discover the correct stream URI for any IP camera.
 
 ---
 
-## 13. Adapting the Plate Format
+## 14. Adapting for Different Plate Formats
 
-The default format validator in `detection.py` expects **UK-style 7-character plates** in the pattern `LLDDLLL` (L = letter, D = digit), for example `AB12CDE`.
+The default validator in `detection.py` targets **Indian 10-character plates** (`MH12AB1234` format). To support a different country:
 
-To adapt for a different country, edit `_complies_format()` in `detection.py`:
-
-### Indian plates (e.g. MH 12 AB 1234)
+### UK plates (LLDDLLL, 7 characters)
 
 ```python
 def _complies_format(text: str) -> bool:
-    # Format: 2 letters + 2 digits + 2 letters + 4 digits = 10 chars
-    if len(text) != 10:
+    if len(text) != 7:
         return False
-    return (
-        text[0:2].isalpha() and
-        text[2:4].isdigit() and
-        text[4:6].isalpha() and
-        text[6:10].isdigit()
-    )
+    return (text[0:2].isalpha() and text[2:4].isdigit() and text[4:7].isalpha())
 ```
 
-### US plates (highly variable — relaxed validator)
+### US plates (relaxed, 5–8 alphanumeric)
 
 ```python
 def _complies_format(text: str) -> bool:
-    # Accept 5–8 alphanumeric characters
     return 5 <= len(text) <= 8 and text.isalnum()
 ```
 
-### German plates (e.g. B·AB·1234)
+### Indian BH-series plates (22BH1234AA)
 
-```python
-def _complies_format(text: str) -> bool:
-    # After stripping spaces/hyphens: 2-8 chars, mix of letters and digits
-    return 5 <= len(text) <= 8 and text.isalnum()
-```
+Already supported via the `INDIAN_PLATE_PATTERNS` list in `detection.py`. The second pattern covers BH-series plates.
 
-Also update the `_format_plate()` character substitution mappings to match your format's letter and digit positions.
+Also update `_apply_corrections()` to match the letter/digit positions of your target format.
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 ### Camera won't open
 
@@ -668,26 +808,26 @@ Also update the `_format_plate()` character substitution mappings to match your 
 RuntimeError: Cannot open camera source: 0
 ```
 
-- On Linux, confirm the device exists: `ls /dev/video*`
-- Try a different index (`--source 1`, `--source 2`)
+- On Linux, confirm device exists: `ls /dev/video*`
+- Try a different index: `--source 1`, `--source 2`
 - For RTSP, test the URL in VLC first: **Media → Open Network Stream → paste URL**
-- Ensure no other process is holding the camera open
+- Ensure no other process is holding the camera
 
-### OCR reads nothing / always returns None
+### OCR returns nothing / always None
 
-- Increase frame resolution — plates need to be at least 80–100 px wide to OCR reliably
-- Check the preprocessed image by temporarily adding `cv2.imshow("crop", plate_crop)` in `camera.py` after `detect_plate()` returns
-- Lower `CONFIDENCE_THRESHOLD` in `config.py` to 0.40–0.50 as a diagnostic step
-- Ensure `license_plate_detector.pt` was trained on plates from your region
+- Plates need to be at least 80–100 px wide to OCR reliably; increase camera resolution
+- Temporarily add `cv2.imshow("crop", plate_crop)` after `detect_plate()` to inspect the crop
+- Lower `CONFIDENCE_THRESHOLD` to 0.40–0.50 as a diagnostic
+- Ensure `best.pt` was trained on plates from your region
 
 ### Plates detected but format validation always fails
 
-- Your plates don't match the 7-character UK format — see [Section 13](#13-adapting-the-plate-format)
-- Print rejected texts to the log by temporarily adding `logger.debug(f"Rejected: {text}")` inside `read_plate()` before the `return None, 0.0` line
+- Your plates don't match the Indian 10-char pattern — see [Section 14](#14-adapting-for-different-plate-formats)
+- Temporarily add `logger.debug(f"Rejected: {text}")` inside `read_plate()` to see rejected strings
 
 ### Database locked errors (multiple camera processes)
 
-Enable WAL mode once:
+Enable WAL mode:
 
 ```bash
 python -c "import sqlite3; conn = sqlite3.connect('parking.db'); conn.execute('PRAGMA journal_mode=WAL'); conn.close()"
@@ -695,28 +835,52 @@ python -c "import sqlite3; conn = sqlite3.connect('parking.db'); conn.execute('P
 
 ### GPU not being used
 
-- Verify CUDA installation: `python -c "import torch; print(torch.cuda.is_available())"`
-- Install the CUDA-specific torch build (see [Installation, Step 3](#step-3--install-dependencies))
-- Set `USE_GPU=true` in your `.env` or environment
+- Check CUDA: `python -c "import torch; print(torch.cuda.is_available())"`
+- Install the CUDA-specific torch build (see [Installation Step 3](#step-3--install-python-dependencies))
+- Set `USE_GPU=true` in `.env` and `gpu=True` in `_get_reader()` inside `detection.py`
 
-### Exit logged but no entry exists
+### Exit logged with no matching entry
 
-The log will show: `EXIT skipped — no open entry found for <plate>`
+Log shows: `EXIT skipped — no open entry found for <plate>`
 
-This happens when:
-- The vehicle entered before the system was running
-- The entry camera missed the plate (low confidence / poor angle)
-- A previous session's data was cleared
-
-Use `python admin.py manual-exit <plate>` to force a clean exit record if needed.
+This happens when the entry camera missed the vehicle (low confidence, bad angle) or the system was restarted after entry but before exit. Use `python admin.py manual-exit <plate>` to insert a clean exit record.
 
 ---
 
-## 15. Next-Level Upgrades
+## 16. Real-World Applications
 
-### Gate barrier automation
+### 1. Commercial parking lots and malls
+Fully automate entry/exit at multi-level parking structures. Replace token-based or barrier card systems with plate recognition. Integrate with billing software to compute charges based on `duration_sec`.
 
-Connect a relay module (e.g. SainSmart 5V relay) to a Raspberry Pi GPIO pin. Wire the relay's COM and NO terminals to the barrier controller's trigger input (typically 12V dry contact). Then add a GPIO trigger call after `mark_entry()` in `camera.py`:
+### 2. Residential apartment complexes
+Restrict access to registered residents and authorised visitors. Automatically log every vehicle that enters the premises. Flag unregistered plates for security review.
+
+### 3. Corporate campuses and office parks
+Track employee vehicle access, automate visitor check-in, and generate occupancy reports for facilities management.
+
+### 4. Hospital and airport short-stay drop zones
+Detect when a vehicle has been in a drop zone beyond the permitted time, and trigger an alert or notification to the vehicle owner.
+
+### 5. Toll plazas and highway checkpoints
+Identify vehicles passing through a checkpoint for billing, traffic analytics, or law enforcement flagging. With sufficient hardware, support for multiple simultaneous lanes is feasible.
+
+### 6. Fleet and logistics yards
+Log all truck and delivery van entries/exits at a depot. Verify that departing vehicles match scheduled dispatch records.
+
+### 7. Smart city traffic analytics
+Aggregate anonymised entry/exit data across multiple sites to build origin–destination matrices, identify traffic bottlenecks, and support urban planning decisions.
+
+### 8. Evidence logging for security incidents
+Maintain a tamper-resistant timestamped record of all vehicles that entered and exited a premises during a specific time window, useful for post-incident investigations.
+
+---
+
+## 17. Future Improvements & Roadmap
+
+### Near-term enhancements
+
+**Gate barrier automation**
+Connect a relay module (e.g. SainSmart 5V relay) to a Raspberry Pi GPIO pin. Wire the relay's COM and NO terminals to the barrier controller's trigger input. Then trigger the barrier after `mark_entry()` in `camera.py`:
 
 ```python
 import RPi.GPIO as GPIO
@@ -724,52 +888,26 @@ GPIO.setmode(GPIO.BCM)
 GPIO.setup(BARRIER_PIN, GPIO.OUT)
 
 # After successful mark_entry():
-GPIO.output(BARRIER_PIN, GPIO.HIGH)   # open gate
-time.sleep(5)                          # hold open
-GPIO.output(BARRIER_PIN, GPIO.LOW)    # close gate
+GPIO.output(BARRIER_PIN, GPIO.HIGH)
+time.sleep(5)
+GPIO.output(BARRIER_PIN, GPIO.LOW)
 ```
 
-### Web admin dashboard
-
-Expose the database functions via a FastAPI REST API, then build a frontend dashboard with React or plain HTML. A minimal API layer:
-
-```python
-from fastapi import FastAPI
-from database import get_active_vehicles, export_csv
-
-app = FastAPI()
-
-@app.get("/api/active")
-def active():
-    return get_active_vehicles()
-
-@app.get("/api/stats")
-def stats():
-    # query today's counts from DB
-    ...
-```
-
-Run with: `uvicorn api:app --host 0.0.0.0 --port 8000`
-
-### Payment calculation
-
-Add a `tariffs` table mapping duration bands to prices. On exit, look up the applicable tariff and insert a `payments` record:
+**Payment calculation**
+Add a `tariffs` table to the database and compute fees on exit:
 
 ```sql
 CREATE TABLE tariffs (
     min_sec   INTEGER,
     max_sec   INTEGER,
-    price_gbp REAL
+    price_inr REAL
 );
-INSERT INTO tariffs VALUES (0, 3600, 1.00);         -- 0–1 hour: £1.00
-INSERT INTO tariffs VALUES (3600, 7200, 2.00);      -- 1–2 hours: £2.00
-INSERT INTO tariffs VALUES (7200, 999999, 3.50);    -- 2+ hours: £3.50
+INSERT INTO tariffs VALUES (0, 3600, 20.00);       -- 0–1 hour: ₹20
+INSERT INTO tariffs VALUES (3600, 7200, 40.00);    -- 1–2 hours: ₹40
+INSERT INTO tariffs VALUES (7200, 999999, 60.00);  -- 2+ hours: ₹60
 ```
 
-### Occupancy counter
-
-Query the count of open entries at any time:
-
+**Occupancy counter**
 ```python
 def current_occupancy() -> int:
     with _connect() as conn:
@@ -778,16 +916,64 @@ def current_occupancy() -> int:
         ).fetchone()[0]
 ```
 
-Compare against a `TOTAL_SPACES` constant to compute percentage full, and push the value to a display sign or dashboard widget.
+Compare against a `TOTAL_SPACES` constant to compute percentage full and push to a display board.
 
-### Data retention automation
-
-Add a nightly cron job to delete records beyond your retention policy:
-
+**Data retention automation**
+Add a nightly cron job:
 ```bash
-# Delete records older than 30 days — add to crontab with: crontab -e
 0 2 * * * sqlite3 /path/to/parking.db "DELETE FROM parking_log WHERE entry_time < datetime('now', '-30 days');"
 ```
+
+---
+
+### Medium-term upgrades
+
+**REST API and web dashboard**
+Expose database functions via a FastAPI REST API and build an operator dashboard:
+
+```python
+from fastapi import FastAPI
+from database import get_active_vehicles
+
+app = FastAPI()
+
+@app.get("/api/active")
+def active():
+    return get_active_vehicles()
+```
+
+Run with: `uvicorn api:app --host 0.0.0.0 --port 8000`
+
+**SMS / push alerts**
+Integrate with Twilio or Firebase Cloud Messaging to send real-time alerts when a VIP vehicle arrives, when occupancy exceeds a threshold, or when a vehicle overstays its permitted duration.
+
+**Whitelist / blacklist system**
+Add a `vehicles` table with `plate_number`, `owner_name`, `status` (allowed/blocked/VIP). Check this before `mark_entry()` and deny or flag access accordingly.
+
+**Multi-site centralised database**
+Replace the local SQLite file with a PostgreSQL or MySQL instance. Multiple parking facilities can report to a single database, enabling cross-site analytics from one dashboard.
+
+**Edge deployment on Jetson**
+Run inference on an NVIDIA Jetson Orin Nano for lower power consumption at remote sites with no internet connectivity. The codebase is fully compatible; change `gpu=True` in `_get_reader()` and ensure CUDA is available on the device.
+
+---
+
+### Long-term vision
+
+**LLM-powered analytics**
+Connect the parking database to an LLM assistant that can answer natural language queries like "How many vehicles stayed more than 3 hours on weekends this month?" or "Which plates visited most frequently but never completed a full exit record?"
+
+**Vehicle type classification**
+Add a second YOLOv8 model trained to classify vehicle type (car, motorcycle, bus, truck). Charge different tariffs per vehicle class and report occupancy by type.
+
+**Predictive occupancy forecasting**
+Train a time-series model (e.g. LSTM or Prophet) on historical entry/exit patterns to predict peak occupancy periods. Display forecasts on the operator dashboard and pre-emptively open overflow zones.
+
+**Automatic re-training pipeline**
+Build a CI/CD loop: every week, export all logged plates as a new dataset batch, review and annotate difficult cases, and trigger a fine-tuning run to continuously improve the OCR and detection models.
+
+**Integration with national vehicle registries**
+For law enforcement or regulatory use cases, integrate with RTO (Road Transport Office) APIs to verify that detected plates are registered, valid, and not flagged as stolen or overdue for inspection.
 
 ---
 
@@ -801,5 +987,5 @@ MIT License — see `LICENSE` file for details.
 
 - [Ultralytics YOLOv8](https://github.com/ultralytics/ultralytics) — object detection framework
 - [EasyOCR](https://github.com/JaidedAI/EasyOCR) — OCR engine
-- [Roboflow License Plate Recognition Dataset](https://universe.roboflow.com/roboflow-universe-projects/license-plate-recognition-rxg4e) — training data for the plate detector
-- Original demo project by [Muhammad Zeerak Khan](https://github.com/Muhammad-Zeerak-Khan/Automatic-License-Plate-Recognition-using-YOLOv8)
+- [Roboflow License Plate Recognition Dataset](https://universe.roboflow.com/roboflow-universe-projects/license-plate-recognition-rxg4e) — training data
+- Original ANPR demo by [Muhammad Zeerak Khan](https://github.com/Muhammad-Zeerak-Khan/Automatic-License-Plate-Recognition-using-YOLOv8)
