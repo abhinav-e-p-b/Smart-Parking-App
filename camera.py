@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────
-CONFIDENCE_THRESHOLD = 0.6      # Minimum OCR confidence to accept a reading
-DEBOUNCE_SECONDS = 10           # Ignore same plate within this window
-recent_detections: dict[str, float] = {}  # plate -> last_seen timestamp
+CONFIDENCE_THRESHOLD = 0.6
+DEBOUNCE_SECONDS = 10
+recent_detections: dict[str, float] = {}
 
 
 def is_debounced(plate: str) -> bool:
@@ -40,8 +40,8 @@ def is_debounced(plate: str) -> bool:
 
 class TemporalConsistencyFilter:
     """
-    A plate detection is only accepted if it appears in 
-    K out of the last N frames. Kills transient false positives.
+    A plate detection is only accepted if it appears in
+    min_hits out of the last window frames.
     """
     def __init__(self, window: int = 5, min_hits: int = 3):
         self.window = window
@@ -51,21 +51,17 @@ class TemporalConsistencyFilter:
     def update(self, plate: str) -> bool:
         """Call with detected plate. Returns True only if temporally stable."""
         self.history[plate].append(1)
-        # Pad unseen frames as 0
-        while len(self.history[plate]) < self.window:
-            self.history[plate].appendleft(0)
         return sum(self.history[plate]) >= self.min_hits
 
     def miss(self, plates_seen: list[str]):
-        """Call every frame with all detected plates to log misses."""
-        for plate in self.history:
+        """
+        Call every frame with all detected plates to register misses
+        for plates NOT seen this frame, allowing their scores to decay.
+        """
+        for plate in list(self.history.keys()):
             if plate not in plates_seen:
                 self.history[plate].append(0)
 
-# Usage in run() in camera.py:
-# tcf = TemporalConsistencyFilter(window=5, min_hits=3)
-# if tcf.update(plate_text):
-#     mark_entry(plate_text)
 
 def open_camera(source) -> cv2.VideoCapture:
     """Open webcam index or RTSP URL."""
@@ -75,8 +71,13 @@ def open_camera(source) -> cv2.VideoCapture:
     else:
         logger.info(f"Opening webcam index: {source}")
         cap = cv2.VideoCapture(int(source))
+
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open camera source: {source}")
+
+    # Prefer 720p for better plate resolution on laptop webcam
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     return cap
 
 
@@ -100,38 +101,35 @@ def run(camera_mode: str, camera_source):
             time.sleep(2)
             cap = open_camera(camera_source)
             continue
-        plate_text=None
-        confidence=0.0
 
-        
-        # ── 1. MC Dropout Detection ─────────────────────────────
-        plate_crop = detect_plate(
-            frame,
-            n_passes=5,
-            consistency_threshold=0.6
-        )
+        plate_text = None
+        confidence = 0.0
+        detected_plates_this_frame = []
+
+        # ── 1. Plate Detection ──────────────────────────────────
+        plate_crop = detect_plate(frame, n_passes=5, consistency_threshold=0.6)
 
         if plate_crop is None:
+            # FIX: register misses for all tracked plates
             tcf.miss([])
         else:
-            # ── 2. OCR Ensemble ─────────────────────────────────
-            plate_text, confidence = read_plate(
-                plate_crop,
-                n_variants=5
-            )
+            # ── 2. OCR Ensemble ──────────────────────────────────
+            plate_text, confidence = read_plate(plate_crop, n_variants=5)
 
-            # ── 3. High-Specificity Gate ───────────────────────
+            if plate_text:
+                detected_plates_this_frame.append(plate_text)
+
+            # FIX: register misses for plates not seen this frame
+            tcf.miss(detected_plates_this_frame)
+
+            # ── 3. High-Specificity Gate ──────────────────────────
             if plate_text and confidence >= CONFIDENCE_THRESHOLD:
-
                 if tcf.update(plate_text):
-
                     if not is_debounced(plate_text):
-
                         logger.info(
                             f"HIGH-SPECIFICITY detection: "
                             f"{plate_text} (conf={confidence:.2f})"
                         )
-
                         if camera_mode == "entry":
                             mark_entry(plate_text)
                         else:
@@ -142,18 +140,31 @@ def run(camera_mode: str, camera_source):
                                     f"Exit scan for {plate_text} "
                                     f"but no entry record found"
                                 )
+                else:
+                    tcf.update(plate_text)  # still accumulate hits
 
-        # ── 4. Display ─────────────────────────────────────────
+        # ── 4. Display ──────────────────────────────────────────
         label = plate_text if plate_text else "Detecting..."
+        conf_label = f"  ({confidence:.2f})" if plate_text else ""
+        color = (0, 255, 0) if plate_text else (0, 165, 255)
 
         cv2.putText(
             frame,
-            label,
-            (20, 40),
+            label + conf_label,
+            (20, 50),
             cv2.FONT_HERSHEY_SIMPLEX,
             1.2,
-            (0, 255, 0),
+            color,
             3
+        )
+        cv2.putText(
+            frame,
+            f"MODE: {camera_mode.upper()}",
+            (20, frame.shape[0] - 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
         )
 
         cv2.imshow(f"[{camera_mode.upper()}] Parking Camera", frame)

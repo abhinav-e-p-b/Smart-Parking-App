@@ -4,13 +4,13 @@ admin.py - CLI tool for parking system administration.
 Usage:
     python admin.py status          # List all vehicles currently inside
     python admin.py export          # Export full log to CSV
-    python admin.py manual-exit AB12CDE   # Force an exit record
+    python admin.py manual-exit MH12AB1234   # Force an exit record
     python admin.py stats           # Today's summary
 """
 
 import argparse
 import sys
-from datetime import datetime, timezone, date
+from datetime import date
 import sqlite3
 from database import get_active_vehicles, mark_exit, export_csv, DB_PATH
 
@@ -20,10 +20,10 @@ def cmd_status(args):
     if not vehicles:
         print("No vehicles currently inside.")
         return
-    print(f"\n{'Plate':<12}  {'Entry Time (UTC)'}")
-    print("─" * 40)
+    print(f"\n{'Plate':<14}  {'Entry Time (UTC)'}")
+    print("─" * 45)
     for v in vehicles:
-        print(f"{v['plate_number']:<12}  {v['entry_time']}")
+        print(f"{v['plate_number']:<14}  {v['entry_time']}")
     print(f"\nTotal inside: {len(vehicles)}")
 
 
@@ -34,8 +34,10 @@ def cmd_export(args):
 
 
 def cmd_manual_exit(args):
-    plate = args.plate.upper()
+    plate = args.plate.upper().replace(" ", "").replace("-", "")
+    print(f"Forcing exit for plate: {plate}")
     mark_exit(plate)
+    print(f"Done. Check parking.log for confirmation.")
 
 
 def cmd_stats(args):
@@ -54,7 +56,7 @@ def cmd_stats(args):
         ).fetchone()
 
     avg = completed["avg_dur"]
-    avg_str = f"{int(avg)//60}m {int(avg)%60}s" if avg else "N/A"
+    avg_str = f"{int(avg) // 60}m {int(avg) % 60}s" if avg else "N/A"
     print(f"\n── Today's Stats ({today}) ──────────────────")
     print(f"  Total entries  : {total_entries}")
     print(f"  Completed exits: {completed['c']}")
@@ -72,7 +74,7 @@ def main():
     exp.add_argument("--output", help="Output file path (default: parking_log.csv)")
 
     mx = sub.add_parser("manual-exit", help="Force an exit record for a plate")
-    mx.add_argument("plate", help="License plate number")
+    mx.add_argument("plate", help="License plate number (e.g. MH12AB1234)")
 
     sub.add_parser("stats", help="Show today's statistics")
 

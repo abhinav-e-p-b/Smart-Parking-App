@@ -1,6 +1,0 @@
-train: C:/Users/abhin/Downloads/Smart-Parking-App/number-plate-1/train/images
-val: C:/Users/abhin/Downloads/Smart-Parking-App/number-plate-1/valid/images
-test: C:/Users/abhin/Downloads/Smart-Parking-App/number-plate-1/test/images
-
-nc: 1
-names: ['license_plate']
