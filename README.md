@@ -143,7 +143,7 @@ python admin.py manual-exit KL07BB1234   # force-exit a stuck session
 
 ---
 
-## Camera Setup
+## Camera Setup For Testing
 
 ### Laptop webcam + USB camera
 ```
