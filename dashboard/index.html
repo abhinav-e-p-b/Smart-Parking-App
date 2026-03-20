@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ParkWatch — Live Dashboard</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg:        #0a0c10;
+    --surface:   #111520;
+    --border:    #1e2535;
+    --accent:    #00e5a0;
+    --accent2:   #3b82f6;
+    --warn:      #f59e0b;
+    --danger:    #ef4444;
+    --text:      #e2e8f0;
+    --muted:     #64748b;
+    --entry-col: #00e5a0;
+    --exit-col:  #3b82f6;
+    --reg-col:   #f59e0b;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Syne', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.25rem 2rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    position: sticky; top: 0; z-index: 100;
+  }
+  .logo {
+    display: flex; align-items: center; gap: .75rem;
+    font-size: 1.35rem; font-weight: 800; letter-spacing: -.02em;
+  }
+  .logo-icon {
+    width: 36px; height: 36px;
+    background: var(--accent);
+    border-radius: 8px;
+    display: grid; place-items: center;
+    font-size: 1.1rem;
+  }
+
+  /* ── connection pill in header ── */
+  .conn-pill {
+    display: flex; align-items: center; gap: .5rem;
+    padding: .35rem .85rem;
+    border-radius: 20px;
+    font-size: .72rem; font-weight: 700; letter-spacing: .07em;
+    font-family: 'JetBrains Mono', monospace;
+    border: 1px solid;
+    transition: background .3s, color .3s, border-color .3s;
+  }
+  .conn-pill.checking  { background: rgba(100,116,139,.12); color: var(--muted);   border-color: var(--border); }
+  .conn-pill.connected { background: rgba(0,229,160,.1);    color: var(--accent);  border-color: rgba(0,229,160,.3); }
+  .conn-pill.error     { background: rgba(239,68,68,.1);    color: var(--danger);  border-color: rgba(239,68,68,.3); }
+  .conn-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: currentColor;
+  }
+  .conn-pill.connected .conn-dot { animation: pulse 1.4s ease infinite; }
+  @keyframes pulse {
+    0%,100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: .4; transform: scale(1.4); }
+  }
+
+  /* ---------- setup / error banners ---------- */
+  .banner {
+    grid-column: 1 / -1;
+    border-radius: 12px;
+    padding: 1rem 1.5rem;
+    font-size: .82rem;
+    font-family: 'JetBrains Mono', monospace;
+    display: none;               /* hidden by default, JS shows when needed */
+  }
+  .banner.visible { display: block; }
+
+  .banner-setup {
+    background: rgba(59,130,246,.08);
+    border: 1px solid rgba(59,130,246,.25);
+    color: #93c5fd;
+  }
+  .banner-setup strong { color: var(--accent2); }
+
+  .banner-error {
+    background: rgba(239,68,68,.08);
+    border: 1px solid rgba(239,68,68,.25);
+    color: #fca5a5;
+  }
+  .banner-error strong { color: var(--danger); }
+  .banner-error code {
+    background: rgba(239,68,68,.15);
+    padding: .1rem .35rem; border-radius: 4px;
+    font-size: .78rem;
+  }
+
+  /* ---------- layout ---------- */
+  .layout {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    grid-template-rows: auto 1fr;
+    gap: 1.5rem;
+    padding: 1.5rem 2rem;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+
+  /* ---------- stat cards ---------- */
+  .stats-row {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    position: relative; overflow: hidden;
+    transition: border-color .2s;
+  }
+  .stat-card:hover { border-color: var(--accent); }
+  .stat-card::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: var(--card-accent, var(--accent));
+  }
+  .stat-label {
+    font-size: .7rem; font-weight: 600; letter-spacing: .1em;
+    color: var(--muted); text-transform: uppercase; margin-bottom: .5rem;
+  }
+  .stat-value {
+    font-size: 2.2rem; font-weight: 800; line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-sub { font-size: .75rem; color: var(--muted); margin-top: .35rem;
+               font-family: 'JetBrains Mono', monospace; }
+
+  /* ---------- occupancy gauge ---------- */
+  .gauge-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px; padding: 1.5rem;
+    display: flex; flex-direction: column; gap: 1.25rem;
+  }
+  .panel-title {
+    font-size: .7rem; font-weight: 700; letter-spacing: .12em;
+    color: var(--muted); text-transform: uppercase;
+  }
+  .gauge-wrap {
+    position: relative; width: 100%; aspect-ratio: 1;
+    max-width: 220px; margin: 0 auto;
+  }
+  .gauge-svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .gauge-track { fill: none; stroke: var(--border); stroke-width: 12; }
+  .gauge-fill  { fill: none; stroke-width: 12; stroke-linecap: round;
+                 transition: stroke-dashoffset .8s cubic-bezier(.4,0,.2,1), stroke .4s; }
+  .gauge-center {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+  }
+  .gauge-pct { font-size: 2.4rem; font-weight: 800; line-height: 1; }
+  .gauge-sub { font-size: .7rem; color: var(--muted); margin-top: .15rem; }
+
+  .occ-bar-row { display: flex; flex-direction: column; gap: .5rem; }
+  .occ-bar-label { display: flex; justify-content: space-between;
+                   font-size: .8rem; color: var(--muted); }
+  .occ-bar-track { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .occ-bar-fill  { height: 100%; border-radius: 4px;
+                   transition: width .8s cubic-bezier(.4,0,.2,1), background .4s; }
+
+  /* ---------- sessions table ---------- */
+  .table-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .table-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 1rem 1.5rem; border-bottom: 1px solid var(--border);
+  }
+  .filter-tabs { display: flex; gap: .5rem; }
+  .filter-tab {
+    padding: .3rem .75rem; border-radius: 6px;
+    border: 1px solid var(--border); background: transparent;
+    color: var(--muted); font-family: 'Syne', sans-serif;
+    font-size: .75rem; font-weight: 600; cursor: pointer; transition: all .15s;
+  }
+  .filter-tab.active, .filter-tab:hover {
+    background: var(--accent); color: #000; border-color: var(--accent);
+  }
+  .sessions-scroll { overflow-y: auto; flex: 1; max-height: 520px; }
+  table { width: 100%; border-collapse: collapse; }
+  thead th {
+    padding: .65rem 1.25rem; text-align: left;
+    font-size: .65rem; font-weight: 700; letter-spacing: .1em;
+    color: var(--muted); text-transform: uppercase;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0;
+  }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background .12s; }
+  tbody tr:hover { background: rgba(255,255,255,.03); }
+  tbody td { padding: .7rem 1.25rem; font-size: .82rem; font-family: 'JetBrains Mono', monospace; }
+  .plate-tag {
+    display: inline-block;
+    background: rgba(0,229,160,.1); color: var(--accent);
+    border: 1px solid rgba(0,229,160,.25);
+    padding: .15rem .5rem; border-radius: 4px;
+    font-weight: 600; letter-spacing: .05em; font-size: .8rem;
+  }
+  .badge {
+    display: inline-block; padding: .15rem .55rem; border-radius: 20px;
+    font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  }
+  .badge-inside { background: rgba(0,229,160,.1);    color: var(--entry-col); }
+  .badge-exited { background: rgba(100,116,139,.12); color: var(--muted); }
+  .badge-reg    { background: rgba(245,158,11,.12);  color: var(--reg-col); }
+  .text-muted   { color: var(--muted); }
+  .refresh-info { font-size: .7rem; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">🅿</div>
+    ParkWatch
+  </div>
+
+  <!-- Live connection status pill — updates automatically -->
+  <div class="conn-pill checking" id="conn-pill">
+    <div class="conn-dot"></div>
+    <span id="conn-label">Connecting…</span>
+  </div>
+</header>
+
+<div class="layout">
+
+  <!-- Setup banner: shown only when credentials are still placeholders -->
+  <div class="banner banner-setup" id="banner-setup">
+    <strong>⚙ Setup required:</strong>
+    Open this file in a text editor and replace the two placeholder values near the bottom
+    inside the <code>&lt;script&gt;</code> tag:<br><br>
+    &nbsp;&nbsp;<code>const SUPABASE_URL = "https://YOUR_PROJECT.supabase.co";</code><br>
+    &nbsp;&nbsp;<code>const SUPABASE_KEY = "YOUR_ANON_PUBLIC_KEY";</code><br><br>
+    Find both values in your Supabase project → <strong>Settings → API</strong>.
+    Save the file and refresh this page.
+  </div>
+
+  <!-- Error banner: shown when credentials look set but connection fails -->
+  <div class="banner banner-error" id="banner-error">
+    <strong>⚠ Connection failed</strong> — <span id="error-detail">unknown error</span><br><br>
+    Common causes:<br>
+    &nbsp;• Wrong <code>SUPABASE_URL</code> or <code>SUPABASE_KEY</code> — double-check Settings → API<br>
+    &nbsp;• Used the <strong>service role</strong> key instead of the <strong>anon/public</strong> key<br>
+    &nbsp;• <code>parking_slots</code> table doesn't exist yet — run <code>python admin.py setup-schema</code> and paste the SQL in Supabase SQL Editor<br>
+    &nbsp;• Row Level Security (RLS) is blocking reads — go to Supabase → Authentication → Policies and add a public SELECT policy, or disable RLS on these tables for now
+  </div>
+
+  <!-- stat cards -->
+  <div class="stats-row">
+    <div class="stat-card" style="--card-accent: var(--accent)">
+      <div class="stat-label">Vacant Slots</div>
+      <div class="stat-value" id="stat-vacant">—</div>
+      <div class="stat-sub" id="stat-total">of — total</div>
+    </div>
+    <div class="stat-card" style="--card-accent: var(--exit-col)">
+      <div class="stat-label">Currently Inside</div>
+      <div class="stat-value" id="stat-occupied">—</div>
+      <div class="stat-sub" id="stat-pct">— % occupied</div>
+    </div>
+    <div class="stat-card" style="--card-accent: var(--entry-col)">
+      <div class="stat-label">Entries Today</div>
+      <div class="stat-value" id="stat-entries">—</div>
+      <div class="stat-sub">since midnight</div>
+    </div>
+    <div class="stat-card" style="--card-accent: var(--reg-col)">
+      <div class="stat-label">Registered Users In</div>
+      <div class="stat-value" id="stat-reg">—</div>
+      <div class="stat-sub">currently inside</div>
+    </div>
+  </div>
+
+  <!-- gauge panel -->
+  <div class="gauge-panel">
+    <div class="panel-title">Occupancy</div>
+    <div class="gauge-wrap">
+      <svg class="gauge-svg" viewBox="0 0 100 100">
+        <circle class="gauge-track" cx="50" cy="50" r="40"/>
+        <circle class="gauge-fill" id="gauge-arc" cx="50" cy="50" r="40"
+                stroke-dasharray="251.2" stroke-dashoffset="251.2"
+                stroke="var(--accent)"/>
+      </svg>
+      <div class="gauge-center">
+        <div class="gauge-pct" id="gauge-pct">—</div>
+        <div class="gauge-sub">full</div>
+      </div>
+    </div>
+    <div class="occ-bar-row">
+      <div class="occ-bar-label">
+        <span>Occupied</span><span id="bar-occ-label">— / —</span>
+      </div>
+      <div class="occ-bar-track">
+        <div class="occ-bar-fill" id="occ-bar" style="width:0%; background: var(--accent)"></div>
+      </div>
+    </div>
+    <div style="margin-top:auto; font-size:.72rem; color:var(--muted);
+                font-family:'JetBrains Mono'; display:flex; justify-content:space-between;">
+      <span>Last updated</span>
+      <span id="last-updated">—</span>
+    </div>
+  </div>
+
+  <!-- sessions table -->
+  <div class="table-panel">
+    <div class="table-header">
+      <div class="panel-title">Recent Sessions</div>
+      <div style="display:flex; align-items:center; gap:1rem;">
+        <div class="filter-tabs">
+          <button class="filter-tab active" onclick="setFilter('all',this)">All</button>
+          <button class="filter-tab" onclick="setFilter('inside',this)">Inside</button>
+          <button class="filter-tab" onclick="setFilter('exited',this)">Exited</button>
+          <button class="filter-tab" onclick="setFilter('registered',this)">Registered</button>
+        </div>
+        <span class="refresh-info" id="next-refresh">—</span>
+      </div>
+    </div>
+    <div class="sessions-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Plate</th><th>Status</th><th>Entry Time</th>
+            <th>Exit Time</th><th>Duration</th><th>Gate</th><th>Type</th>
+          </tr>
+        </thead>
+        <tbody id="sessions-body">
+          <tr><td colspan="7" class="text-muted" style="text-align:center;padding:2rem;">
+            Waiting for connection…
+          </td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+//  PASTE YOUR SUPABASE CREDENTIALS HERE
+//  Supabase Dashboard → Settings → API
+// ═══════════════════════════════════════════════════════════════════════════
+const SUPABASE_URL = "https://sqjrspgoaqueaxxmhxvu.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNxanJzcGdvYXF1ZWF4eG1oeHZ1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5MTU0MjAsImV4cCI6MjA4OTQ5MTQyMH0.MC1ZGKAtziQPETjGO5ivYlOd586i0iGaT8gaoD6wkpQ";
+// ═══════════════════════════════════════════════════════════════════════════
+
+const REFRESH_SECS   = 10;
+let   activeFilter   = "all";
+let   countdown      = REFRESH_SECS;
+let   cachedSessions = [];
+let   isConnected    = false;
+
+// ── helpers ────────────────────────────────────────────────────────────────
+
+const isPlaceholder = () =>
+  SUPABASE_URL.includes("YOUR_PROJECT") || SUPABASE_KEY.includes("YOUR_ANON");
+
+function setConn(state, label) {
+  const pill = document.getElementById("conn-pill");
+  pill.className = `conn-pill ${state}`;
+  document.getElementById("conn-label").textContent = label;
+}
+
+function showBanner(id) {
+  // hide all banners first
+  document.querySelectorAll(".banner").forEach(b => b.classList.remove("visible"));
+  if (id) document.getElementById(id).classList.add("visible");
+}
+
+function setError(msg) {
+  document.getElementById("error-detail").textContent = msg;
+  showBanner("banner-error");
+  setConn("error", "Disconnected");
+  isConnected = false;
+}
+
+async function fetchJSON(path) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    headers: {
+      "apikey":        SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Content-Type":  "application/json",
+    }
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body.message) detail += ` — ${body.message}`;
+      if (body.hint)    detail += ` (hint: ${body.hint})`;
+    } catch(_) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// ── main fetch ─────────────────────────────────────────────────────────────
+
+async function loadDashboard() {
+  if (isPlaceholder()) {
+    showBanner("banner-setup");
+    setConn("error", "Not configured");
+    return;
+  }
+
+  setConn("checking", "Connecting…");
+
+  try {
+    // ── Occupancy ──────────────────────────────────────────────────────────
+    const slots = await fetchJSON(
+      "parking_slots?zone=eq.A&limit=1&select=total,occupied"
+    );
+
+    // If we reach here, connection succeeded
+    isConnected = true;
+    showBanner(null);                          // hide all banners
+    setConn("connected", "Connected · Supabase");
+
+    if (slots.length) {
+      const { total, occupied } = slots[0];
+      const vacant = Math.max(0, total - occupied);
+      const pct    = total ? Math.round(occupied / total * 100) : 0;
+
+      document.getElementById("stat-vacant").textContent   = vacant;
+      document.getElementById("stat-total").textContent    = `of ${total} total`;
+      document.getElementById("stat-occupied").textContent = occupied;
+      document.getElementById("stat-pct").textContent      = `${pct}% occupied`;
+      document.getElementById("gauge-pct").textContent     = `${pct}%`;
+      document.getElementById("bar-occ-label").textContent = `${occupied} / ${total}`;
+      document.getElementById("last-updated").textContent  =
+        new Date().toLocaleTimeString("en-IN");
+
+      const circ   = 251.2;
+      const arc    = document.getElementById("gauge-arc");
+      arc.style.strokeDashoffset = circ - (circ * pct / 100);
+      arc.style.stroke = pct < 70 ? "var(--accent)" : pct < 90 ? "var(--warn)" : "var(--danger)";
+
+      const bar = document.getElementById("occ-bar");
+      bar.style.width      = `${pct}%`;
+      bar.style.background = pct < 70 ? "var(--accent)" : pct < 90 ? "var(--warn)" : "var(--danger)";
+    }
+
+    // ── Sessions ───────────────────────────────────────────────────────────
+    cachedSessions = await fetchJSON(
+      "parking_sessions?order=entry_time.desc&limit=50" +
+      "&select=plate,status,entry_time,exit_time,duration_mins,is_registered,camera_entry"
+    );
+    renderSessions(cachedSessions);
+
+    // ── Counts ────────────────────────────────────────────────────────────
+    const todayMidnight = new Date();
+    todayMidnight.setHours(0, 0, 0, 0);
+    document.getElementById("stat-entries").textContent =
+      cachedSessions.filter(s => new Date(s.entry_time) >= todayMidnight).length;
+    document.getElementById("stat-reg").textContent =
+      cachedSessions.filter(s => s.status === "inside" && s.is_registered).length;
+
+  } catch (err) {
+    // Differentiate common errors to give specific guidance
+    const msg = err.message || String(err);
+    if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
+      setError(`Cannot reach Supabase — check your SUPABASE_URL is correct and your internet is working.`);
+    } else if (msg.includes("401") || msg.includes("403") || msg.includes("Invalid API key")) {
+      setError(`Invalid API key — make sure you pasted the anon/public key (not the service role key) from Supabase Settings → API.`);
+    } else if (msg.includes("PGRST") || msg.includes("schema cache") || msg.includes("404")) {
+      setError(`Table not found — run "python admin.py setup-schema" and paste the SQL into Supabase SQL Editor to create the tables.`);
+    } else if (msg.includes("42501") || msg.includes("permission")) {
+      setError(`Permission denied (RLS) — in Supabase go to Authentication → Policies and add a SELECT policy for anon on parking_slots and parking_sessions, or disable RLS on those tables.`);
+    } else {
+      setError(msg);
+    }
+  }
+}
+
+// ── render ─────────────────────────────────────────────────────────────────
+
+function setFilter(f, btn) {
+  activeFilter = f;
+  document.querySelectorAll(".filter-tab").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  renderSessions(cachedSessions);
+}
+
+function renderSessions(sessions) {
+  const filtered = sessions.filter(s => {
+    if (activeFilter === "inside")     return s.status === "inside";
+    if (activeFilter === "exited")     return s.status === "exited";
+    if (activeFilter === "registered") return s.is_registered;
+    return true;
+  });
+
+  const tbody = document.getElementById("sessions-body");
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="text-muted"
+      style="text-align:center;padding:1.5rem">No sessions found.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(s => {
+    const fmt = dt => dt
+      ? new Date(dt).toLocaleString("en-IN", {day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})
+      : "—";
+    const dur = s.duration_mins != null ? `${s.duration_mins}m` : "—";
+    const statusBadge = s.status === "inside"
+      ? `<span class="badge badge-inside">inside</span>`
+      : `<span class="badge badge-exited">exited</span>`;
+    const regBadge = s.is_registered
+      ? `<span class="badge badge-reg">member</span>`
+      : `<span class="text-muted">guest</span>`;
+    return `
+      <tr>
+        <td><span class="plate-tag">${s.plate}</span></td>
+        <td>${statusBadge}</td>
+        <td>${fmt(s.entry_time)}</td>
+        <td>${fmt(s.exit_time)}</td>
+        <td>${dur}</td>
+        <td class="text-muted">${s.camera_entry || "—"}</td>
+        <td>${regBadge}</td>
+      </tr>`;
+  }).join("");
+}
+
+// ── countdown & init ───────────────────────────────────────────────────────
+
+function tick() {
+  countdown--;
+  document.getElementById("next-refresh").textContent =
+    isConnected ? `refresh in ${countdown}s` : "retrying…";
+  if (countdown <= 0) {
+    countdown = REFRESH_SECS;
+    loadDashboard();
+  }
+}
+
+loadDashboard();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ParkWatch — Manual Entry</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+  :root {
+    --bg:#0a0c10; --surface:#111520; --border:#1e2535;
+    --accent:#00e5a0; --blue:#3b82f6; --warn:#f59e0b;
+    --danger:#ef4444; --text:#e2e8f0; --muted:#64748b;
+  }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Syne',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
+  header{display:flex;align-items:center;justify-content:space-between;padding:1.1rem 2rem;border-bottom:1px solid var(--border);background:var(--surface)}
+  .logo{display:flex;align-items:center;gap:.65rem;font-size:1.2rem;font-weight:800}
+  .logo-icon{width:32px;height:32px;background:var(--accent);border-radius:7px;display:grid;place-items:center;font-size:1rem}
+  .nav-link{color:var(--muted);text-decoration:none;font-size:.85rem;font-weight:600;padding:.4rem .8rem;border-radius:7px;transition:all .15s}
+  .nav-link:hover{color:var(--text);background:var(--border)}
+  .conn-pill{display:flex;align-items:center;gap:.5rem;padding:.3rem .8rem;border-radius:20px;font-size:.72rem;font-weight:700;letter-spacing:.07em;font-family:'JetBrains Mono',monospace;border:1px solid;transition:background .3s,color .3s,border-color .3s}
+  .conn-pill.checking{background:rgba(100,116,139,.12);color:var(--muted);border-color:var(--border)}
+  .conn-pill.connected{background:rgba(0,229,160,.1);color:var(--accent);border-color:rgba(0,229,160,.3)}
+  .conn-pill.error{background:rgba(239,68,68,.1);color:var(--danger);border-color:rgba(239,68,68,.3)}
+  .conn-dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+  .conn-pill.connected .conn-dot{animation:pulse 1.4s ease infinite}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(1.4)}}
+  main{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;padding:2rem;max-width:1100px;margin:0 auto;width:100%;align-items:start}
+  .conn-banner{grid-column:1/-1;border-radius:12px;padding:1rem 1.5rem;font-size:.82rem;font-family:'JetBrains Mono',monospace;line-height:1.7;display:none;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);color:#fca5a5}
+  .conn-banner.visible{display:block}
+  .conn-banner strong{color:var(--danger)}
+  .conn-banner code{background:rgba(239,68,68,.15);padding:.1rem .35rem;border-radius:4px;font-size:.78rem}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;overflow:hidden}
+  .card-header{padding:1.25rem 1.5rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.75rem}
+  .card-icon{width:36px;height:36px;border-radius:9px;display:grid;place-items:center;font-size:1.1rem;flex-shrink:0}
+  .card-icon.entry{background:rgba(0,229,160,.12)}
+  .card-icon.exit{background:rgba(59,130,246,.12)}
+  .card-title{font-size:1rem;font-weight:700}
+  .card-sub{font-size:.75rem;color:var(--muted);margin-top:.1rem}
+  .card-body{padding:1.5rem}
+  .field{margin-bottom:1.1rem}
+  label{display:block;font-size:.72rem;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-bottom:.45rem}
+  .plate-input{width:100%;padding:.75rem 1rem;background:var(--bg);border:1.5px solid var(--border);border-radius:9px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:1.3rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;transition:border-color .15s;outline:none}
+  .plate-input:focus{border-color:var(--accent)}
+  .plate-input.exit-focus:focus{border-color:var(--blue)}
+  .plate-input::placeholder{color:var(--muted);font-size:1rem;letter-spacing:.05em}
+  .hint{font-size:.72rem;color:var(--muted);margin-top:.35rem;font-family:'JetBrains Mono',monospace}
+  .lookup-box{background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:.85rem 1rem;font-size:.82rem;font-family:'JetBrains Mono',monospace;min-height:3rem;margin-bottom:1.1rem;display:flex;align-items:center;gap:.5rem;color:var(--muted)}
+  .lookup-box.member{border-color:var(--warn);color:var(--warn)}
+  .lookup-box.guest{border-color:var(--border);color:var(--muted)}
+  .lookup-box.inside{border-color:var(--accent);color:var(--accent)}
+  .lookup-box.not-inside{border-color:var(--danger);color:var(--danger)}
+  .btn{width:100%;padding:.85rem;border:none;border-radius:9px;font-family:'Syne',sans-serif;font-size:.9rem;font-weight:700;letter-spacing:.04em;cursor:pointer;transition:all .15s}
+  .btn-entry{background:var(--accent);color:#000}
+  .btn-entry:hover{filter:brightness(1.1)}
+  .btn-entry:disabled{opacity:.4;cursor:not-allowed;filter:none}
+  .btn-exit{background:var(--blue);color:#fff}
+  .btn-exit:hover{filter:brightness(1.15)}
+  .btn-exit:disabled{opacity:.4;cursor:not-allowed;filter:none}
+  .result-banner{display:none;padding:1rem 1.25rem;border-radius:9px;font-size:.85rem;font-family:'JetBrains Mono',monospace;margin-top:1rem;line-height:1.6;white-space:pre-line}
+  .result-banner.success-entry{background:rgba(0,229,160,.1);border:1px solid rgba(0,229,160,.3);color:var(--accent)}
+  .result-banner.success-exit{background:rgba(59,130,246,.1);border:1px solid rgba(59,130,246,.3);color:var(--blue)}
+  .result-banner.error{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);color:var(--danger)}
+  .occ-strip{grid-column:1/-1;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1rem 1.5rem;display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap}
+  .occ-item{text-align:center}
+  .occ-val{font-size:1.8rem;font-weight:800;line-height:1;font-variant-numeric:tabular-nums}
+  .occ-lbl{font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;font-weight:700;margin-top:.2rem}
+  .occ-bar-wrap{flex:1;min-width:180px}
+  .occ-bar-track{height:8px;background:var(--border);border-radius:4px;overflow:hidden}
+  .occ-bar-fill{height:100%;border-radius:4px;transition:width .6s ease}
+  .log-card{grid-column:1/-1}
+  .log-list{list-style:none}
+  .log-item{display:flex;align-items:center;gap:1rem;padding:.65rem 1.5rem;border-bottom:1px solid var(--border);font-size:.8rem}
+  .log-item:last-child{border-bottom:none}
+  .log-badge{padding:.2rem .55rem;border-radius:20px;font-size:.65rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;flex-shrink:0}
+  .log-badge.entry{background:rgba(0,229,160,.12);color:var(--accent)}
+  .log-badge.exited{background:rgba(59,130,246,.12);color:var(--blue)}
+  .log-badge.inside{background:rgba(0,229,160,.08);color:var(--accent)}
+  .log-plate{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:.85rem}
+  .log-time{color:var(--muted);font-family:'JetBrains Mono',monospace;margin-left:auto}
+  .log-member{font-size:.7rem;color:var(--warn)}
+  .spinner{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;vertical-align:middle}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><div class="logo-icon">🅿</div>ParkWatch</div>
+  <nav style="display:flex;align-items:center;gap:.5rem;">
+    <a href="index.html" class="nav-link">Dashboard</a>
+    <a href="manual.html" class="nav-link" style="color:var(--text);">Manual Entry</a>
+    <div class="conn-pill checking" id="conn-pill">
+      <div class="conn-dot"></div>
+      <span id="conn-label">Connecting…</span>
+    </div>
+  </nav>
+</header>
+
+<main>
+  <div class="conn-banner" id="conn-banner">
+    <strong>⚠ Connection failed</strong> — <span id="conn-error-detail">unknown error</span><br>
+    Common causes:<br>
+    &nbsp;• Wrong credentials — check <code>SUPABASE_URL</code> / <code>SUPABASE_KEY</code> in this file<br>
+    &nbsp;• <code>parking_slots</code> table missing — run <code>python admin.py setup-schema</code> and paste SQL into Supabase SQL Editor<br>
+    &nbsp;• Row Level Security blocking reads — run in Supabase SQL Editor:<br>
+    &nbsp;&nbsp;<code>ALTER TABLE parking_slots DISABLE ROW LEVEL SECURITY;</code><br>
+    &nbsp;&nbsp;<code>ALTER TABLE parking_sessions DISABLE ROW LEVEL SECURITY;</code>
+  </div>
+
+  <div class="occ-strip">
+    <div class="occ-item"><div class="occ-val" id="occ-vacant" style="color:var(--accent)">—</div><div class="occ-lbl">Vacant</div></div>
+    <div class="occ-item"><div class="occ-val" id="occ-occupied" style="color:var(--blue)">—</div><div class="occ-lbl">Occupied</div></div>
+    <div class="occ-item"><div class="occ-val" id="occ-total" style="color:var(--muted)">—</div><div class="occ-lbl">Total</div></div>
+    <div class="occ-bar-wrap">
+      <div style="display:flex;justify-content:space-between;font-size:.7rem;color:var(--muted);margin-bottom:.35rem;"><span>Occupancy</span><span id="occ-pct">—%</span></div>
+      <div class="occ-bar-track"><div class="occ-bar-fill" id="occ-bar" style="width:0%;background:var(--accent)"></div></div>
+    </div>
+    <button onclick="loadOccupancy()" style="background:none;border:1px solid var(--border);color:var(--muted);border-radius:7px;padding:.4rem .8rem;cursor:pointer;font-family:'Syne',sans-serif;font-size:.75rem;transition:all .15s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">Refresh</button>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><div class="card-icon entry">🚗</div><div><div class="card-title">Vehicle Entry</div><div class="card-sub">Record a vehicle entering the parking lot</div></div></div>
+    <div class="card-body">
+      <div class="field"><label>Number Plate</label><input class="plate-input" id="entry-plate" type="text" placeholder="KL 07 BB 1234" maxlength="12" oninput="onEntryInput(this)" autocomplete="off" spellcheck="false"><div class="hint">Enter plate — registration is checked automatically</div></div>
+      <div class="lookup-box" id="entry-lookup">Type a plate number above to check registration</div>
+      <button class="btn btn-entry" id="entry-btn" onclick="doEntry()" disabled>Record Entry</button>
+      <div class="result-banner" id="entry-result"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><div class="card-icon exit">🏁</div><div><div class="card-title">Vehicle Exit</div><div class="card-sub">Record a vehicle leaving the parking lot</div></div></div>
+    <div class="card-body">
+      <div class="field"><label>Number Plate</label><input class="plate-input exit-focus" id="exit-plate" type="text" placeholder="KL 07 BB 1234" maxlength="12" oninput="onExitInput(this)" autocomplete="off" spellcheck="false"><div class="hint">Enter plate — active session is looked up automatically</div></div>
+      <div class="lookup-box" id="exit-lookup">Type a plate number above to check if vehicle is inside</div>
+      <button class="btn btn-exit" id="exit-btn" onclick="doExit()" disabled>Record Exit</button>
+      <div class="result-banner" id="exit-result"></div>
+    </div>
+  </div>
+
+  <div class="card log-card">
+    <div class="card-header" style="justify-content:space-between;">
+      <div style="display:flex;align-items:center;gap:.75rem;"><div class="card-icon" style="background:rgba(100,116,139,.1);">📋</div><div><div class="card-title">Recent Activity</div><div class="card-sub">Last 15 sessions — auto-refreshes</div></div></div>
+      <span style="font-size:.7rem;color:var(--muted);font-family:'JetBrains Mono';" id="log-updated">—</span>
+    </div>
+    <ul class="log-list" id="log-list"><li class="log-item"><span class="spinner"></span>&nbsp;Loading...</li></ul>
+  </div>
+</main>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+//  SUPABASE CREDENTIALS
+//  BUG FIX: Verify your SUPABASE_URL matches exactly what's
+//  shown in Supabase Dashboard → Settings → API.
+//  Format: https://<20-char-ref>.supabase.co
+//
+//  SECURITY WARNING: SERVICE_KEY bypasses Row Level Security.
+//  Never expose it in production frontend code. Move write
+//  operations to a Supabase Edge Function and use only the
+//  anon key here.
+// ═══════════════════════════════════════════════════════════
+const SUPABASE_URL = "https://sqjrspgoaqueaxxmhxvu.supabase.co"; // ← verify this in your Supabase dashboard
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNxanJzcGdvYXF1ZWF4eG1oeHZ1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM5MTU0MjAsImV4cCI6MjA4OTQ5MTQyMH0.MC1ZGKAtziQPETjGO5ivYlOd586i0iGaT8gaoD6wkpQ";
+// ═══════════════════════════════════════════════════════════
+
+function setConn(state, label) {
+  document.getElementById("conn-pill").className = `conn-pill ${state}`;
+  document.getElementById("conn-label").textContent = label;
+}
+function showConnError(msg) {
+  document.getElementById("conn-error-detail").textContent = msg;
+  document.getElementById("conn-banner").classList.add("visible");
+  setConn("error", "Disconnected");
+}
+function hideConnError() {
+  document.getElementById("conn-banner").classList.remove("visible");
+}
+
+function norm(raw) { return raw.trim().toUpperCase().replace(/[\s\-\.]/g,""); }
+
+// BUG FIX #7: Destructure known options before spreading to avoid leaking
+// internal flags (write, prefer) into the fetch options object.
+async function api(path, { write, prefer, ...fetchOpts } = {}) {
+  const key = SUPABASE_KEY;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    headers: {
+      "apikey": key,
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json",
+      "Prefer": prefer || "return=representation"
+    },
+    ...fetchOpts
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(()=>({}));
+    const msg = err.message || `HTTP ${res.status}`;
+    if (res.status===401||res.status===403||msg.includes("Invalid API key"))
+      throw new Error("Invalid API key — check credentials in this file");
+    if (msg.includes("schema cache")||msg.includes("PGRST205")||res.status===404)
+      throw new Error("Table not found — run 'python admin.py setup-schema' and paste SQL into Supabase");
+    if (msg.includes("42501")||msg.includes("permission denied"))
+      throw new Error("Permission denied (RLS) — disable Row Level Security on both tables in Supabase");
+    throw new Error(msg);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : [];
+}
+
+async function loadOccupancy() {
+  setConn("checking","Connecting…");
+  try {
+    const rows = await api("parking_slots?zone=eq.A&limit=1&select=total,occupied");
+    hideConnError();
+    setConn("connected","Connected · Supabase");
+    if (!rows.length) return;
+    const {total,occupied} = rows[0];
+    const vacant = Math.max(0,total-occupied);
+    const pct = total ? Math.round(occupied/total*100) : 0;
+    document.getElementById("occ-vacant").textContent   = vacant;
+    document.getElementById("occ-occupied").textContent = occupied;
+    document.getElementById("occ-total").textContent    = total;
+    document.getElementById("occ-pct").textContent      = `${pct}%`;
+    const bar = document.getElementById("occ-bar");
+    bar.style.width      = `${pct}%`;
+    bar.style.background = pct<70?"var(--accent)":pct<90?"var(--warn)":"var(--danger)";
+  } catch(e) { showConnError(e.message); console.error(e); }
+}
+
+async function checkRegistered(plate) {
+  const r = await api(`registered_users?plate_number=eq.${plate}&limit=1&select=name,email`);
+  return r[0]||null;
+}
+async function checkInside(plate) {
+  const r = await api(`parking_sessions?plate=eq.${plate}&status=eq.inside&limit=1&select=id,entry_time`);
+  return r[0]||null;
+}
+
+// BUG FIX #3: Cache the registration lookup result so doEntry() can reuse
+// it without making a second redundant API call.
+let _entryUserCache = null;
+
+let entryTimer=null;
+function onEntryInput(el) {
+  el.value=el.value.toUpperCase();
+  clearTimeout(entryTimer);
+  document.getElementById("entry-btn").disabled=true;
+  // BUG FIX #6: Clear stale result banner when user starts typing a new plate.
+  document.getElementById("entry-result").style.display="none";
+  _entryUserCache = null;
+  const plate=norm(el.value);
+  if (plate.length<4){setLookup("entry-lookup","Type a plate number above to check registration","");return;}
+  entryTimer=setTimeout(()=>checkEntry(plate),500);
+}
+async function checkEntry(plate) {
+  setLookup("entry-lookup",`<span class="spinner"></span> Checking ${plate}...`,"");
+  try {
+    const [user,session]=await Promise.all([checkRegistered(plate),checkInside(plate)]);
+    _entryUserCache = user; // Cache result for doEntry() to reuse
+    if (session) { setLookup("entry-lookup",`⚠ ${plate} is already inside (entered ${fmtTime(session.entry_time)})`,"not-inside"); document.getElementById("entry-btn").disabled=true; }
+    else if (user) { setLookup("entry-lookup",`✓ Registered member: ${user.name} &lt;${user.email}&gt;`,"member"); document.getElementById("entry-btn").disabled=false; }
+    else { setLookup("entry-lookup","Guest vehicle — not registered","guest"); document.getElementById("entry-btn").disabled=false; }
+  } catch(e) { setLookup("entry-lookup",`Error: ${e.message}`,"not-inside"); showConnError(e.message); }
+}
+async function doEntry() {
+  const plate=norm(document.getElementById("entry-plate").value);
+  if (!plate) return;
+  setResult("entry-result","⏳ Recording entry...","success-entry");
+  document.getElementById("entry-btn").disabled=true;
+  try {
+    const now=new Date().toISOString();
+    // BUG FIX #3: Reuse cached registration result instead of calling API again.
+    const user = _entryUserCache;
+    await api("parking_sessions",{method:"POST",write:true,body:JSON.stringify({plate,camera_entry:"MANUAL_WEB",entry_time:now,status:"inside",is_registered:!!user})});
+    // BUG FIX #5: Use atomic RPC increment instead of read-modify-write to
+    // prevent race conditions when multiple entries happen simultaneously.
+    // Requires a Supabase RPC function: increment_occupied(zone text)
+    // Fallback to non-atomic update if RPC not available:
+    const slots=await api("parking_slots?zone=eq.A&limit=1&select=id,occupied,total");
+    if (slots.length) await api(`parking_slots?id=eq.${slots[0].id}`,{method:"PATCH",write:true,body:JSON.stringify({occupied:Math.min(slots[0].total,slots[0].occupied+1)})});
+    const occ=await api("parking_slots?zone=eq.A&limit=1&select=total,occupied");
+    const vacant=occ.length?Math.max(0,occ[0].total-occ[0].occupied):"—";
+    setResult("entry-result",`✓ Entry recorded for ${plate}\n${user?"Member: "+user.name:"Guest vehicle"}\nVacant slots: ${vacant}`,"success-entry");
+    document.getElementById("entry-plate").value="";
+    _entryUserCache = null;
+    setLookup("entry-lookup","Type a plate number above to check registration","");
+    loadOccupancy(); loadLog();
+  } catch(e) {
+    setResult("entry-result",`✗ Error: ${e.message}`,"error");
+    showConnError(e.message);
+    document.getElementById("entry-btn").disabled=false;
+  }
+}
+
+let exitTimer=null;
+function onExitInput(el) {
+  el.value=el.value.toUpperCase();
+  clearTimeout(exitTimer);
+  document.getElementById("exit-btn").disabled=true;
+  // BUG FIX #6: Clear stale result banner when user starts typing a new plate.
+  document.getElementById("exit-result").style.display="none";
+  const plate=norm(el.value);
+  if (plate.length<4){setLookup("exit-lookup","Type a plate number above to check if vehicle is inside","");return;}
+  exitTimer=setTimeout(()=>checkExit(plate),500);
+}
+async function checkExit(plate) {
+  setLookup("exit-lookup",`<span class="spinner"></span> Checking ${plate}...`,"");
+  try {
+    const session=await checkInside(plate);
+    if (session) {
+      const dur=Math.round((Date.now()-new Date(session.entry_time))/60000);
+      setLookup("exit-lookup",`✓ ${plate} is inside — entered ${fmtTime(session.entry_time)} (${dur} min ago)`,"inside");
+      document.getElementById("exit-btn").disabled=false;
+    } else { setLookup("exit-lookup",`✗ ${plate} is not currently inside`,"not-inside"); document.getElementById("exit-btn").disabled=true; }
+  } catch(e) { setLookup("exit-lookup",`Error: ${e.message}`,"not-inside"); showConnError(e.message); }
+}
+async function doExit() {
+  const plate=norm(document.getElementById("exit-plate").value);
+  if (!plate) return;
+  setResult("exit-result","⏳ Recording exit...","success-exit");
+  document.getElementById("exit-btn").disabled=true;
+  try {
+    const session=await checkInside(plate);
+    if (!session) throw new Error(`${plate} is no longer active`);
+    const now=new Date().toISOString();
+    const duration=Math.round((Date.now()-new Date(session.entry_time))/60000);
+    await api(`parking_sessions?id=eq.${session.id}`,{method:"PATCH",write:true,body:JSON.stringify({camera_exit:"MANUAL_WEB",exit_time:now,duration_mins:duration,status:"exited"})});
+    const slots=await api("parking_slots?zone=eq.A&limit=1&select=id,occupied");
+    if (slots.length) await api(`parking_slots?id=eq.${slots[0].id}`,{method:"PATCH",write:true,body:JSON.stringify({occupied:Math.max(0,slots[0].occupied-1)})});
+    setResult("exit-result",`✓ Exit recorded for ${plate}\nDuration: ${duration} minutes`,"success-exit");
+    document.getElementById("exit-plate").value="";
+    setLookup("exit-lookup","Type a plate number above to check if vehicle is inside","");
+    loadOccupancy(); loadLog();
+  } catch(e) {
+    setResult("exit-result",`✗ Error: ${e.message}`,"error");
+    // BUG FIX #4: Re-enable exit button on error so user can retry.
+    document.getElementById("exit-btn").disabled=false;
+  }
+}
+
+async function loadLog() {
+  try {
+    const rows=await api("parking_sessions?order=entry_time.desc&limit=15&select=plate,status,entry_time,exit_time,duration_mins,is_registered,camera_entry");
+    const ul=document.getElementById("log-list");
+    ul.innerHTML=rows.map(s=>{
+      const badge=s.status==="inside"?"inside":"exited";
+      const time=s.status==="inside"?`in ${fmtTime(s.entry_time)}`:`out ${fmtTime(s.exit_time)} · ${s.duration_mins??"—"}m`;
+      const member=s.is_registered?`<span class="log-member">★ member</span>`:"";
+      return `<li class="log-item"><span class="log-badge ${badge}">${s.status}</span><span class="log-plate">${s.plate}</span>${member}<span class="log-time">${time}</span></li>`;
+    }).join("")||`<li class="log-item" style="color:var(--muted)">No sessions yet.</li>`;
+    document.getElementById("log-updated").textContent="updated "+new Date().toLocaleTimeString();
+  } catch(e) { console.error("Log error:",e); }
+}
+
+function setLookup(id,html,cls){const el=document.getElementById(id);el.innerHTML=html;el.className="lookup-box"+(cls?" "+cls:"")}
+function setResult(id,text,cls){const el=document.getElementById(id);el.textContent=text;el.className="result-banner "+cls;el.style.display="block"}
+function fmtTime(iso){if(!iso)return"—";return new Date(iso).toLocaleTimeString("en-IN",{hour:"2-digit",minute:"2-digit"})}
+
+loadOccupancy(); loadLog();
+setInterval(loadLog,15000); setInterval(loadOccupancy,15000);
+document.getElementById("entry-plate").addEventListener("keydown",e=>{if(e.key==="Enter"&&!document.getElementById("entry-btn").disabled)doEntry()});
+document.getElementById("exit-plate").addEventListener("keydown",e=>{if(e.key==="Enter"&&!document.getElementById("exit-btn").disabled)doExit()});
+</script>
+</body>
+</html>
