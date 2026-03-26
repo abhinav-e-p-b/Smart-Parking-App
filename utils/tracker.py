@@ -1,45 +1,40 @@
 """
-utils/tracker.py — BoT-SORT-based plate tracker (boxmot v16 compatible).
+utils/tracker.py — BoT-SORT plate tracker (boxmot v16 compatible).
 
-boxmot v16 API vs v10:
-  - Class name : boxmot.BotSort  (was BoTSORT)
-  - device     : must be torch.device, not a plain string
-  - Output     : [x1, y1, x2, y2, track_id, conf, cls, det_ind]  (unchanged)
+Key fixes vs previous version
+-------------------------------
+1. BotSort thresholds lowered to match real-world plate detection confidence
+   ranges.  The default new_track_thresh=0.6 was silently discarding most
+   detections from a CPU-trained YOLOv8 model where conf typically sits
+   between 0.3 and 0.65.
 
-Deduplication guarantee
-------------------------
-Each unique track ID emits a "confirmed" event EXACTLY ONCE (stored in
-self._emitted).  BotSort's Kalman + ReID ensures one physical plate →
-one track ID for its full lifetime, so no plate is ever logged twice.
+2. det_ind fallback:  BotSort v16 sometimes returns det_ind=-1 or an out-
+   of-range index when a track is re-activated from the lost buffer (no
+   direct detection matched it).  We now use bbox-IoU as a fallback to
+   re-link the plate text when det_ind is unusable.
 
-Graceful fallback
------------------
-If boxmot is absent or fails to load, the tracker falls back to the
-original IoU-only greedy matching automatically.  The public API is
-identical in both paths.
+3. Confirm on ANY valid OCR read:  a track is also confirmed immediately
+   once it accumulates >= 1 valid plate vote AND has been seen enough
+   frames, removing the dependency on a strict majority when the tracker
+   is new and votes are sparse.
+
+boxmot v16 API notes
+---------------------
+  - Class   : boxmot.BotSort  (was BoTSORT in v10)
+  - device  : must be torch.device, not a plain string
+  - Output  : [x1, y1, x2, y2, track_id, conf, cls, det_ind]
 
 Install
 -------
     pip install boxmot>=16.0.0
 
-ReID weights (optional but recommended)
-----------------------------------------
-    # Supply a local .pt path; file is auto-downloaded by boxmot if absent.
-    tracker = PlateTracker(reid_weights="osnet_x0_25_msmt17.pt")
-
-    # Kalman-only (no ReID, faster on CPU):
-    tracker = PlateTracker(reid_weights=None)
-
 Usage
 -----
     tracker = PlateTracker(reid_weights="osnet_x0_25_msmt17.pt", device="cpu")
-
-    for frame in video:
-        dets   = [(x1,y1,x2,y2,conf,plate_text), ...]
-        events = tracker.update(dets, frame)
-        for e in events:
-            if e["type"] == "confirmed":
-                log(e["plate"])   # fires at most once per physical plate
+    events  = tracker.update(raw_dets, frame)   # call once per frame
+    for e in events:
+        if e["type"] == "confirmed":
+            print(e["plate"])   # fires at most once per physical plate
 """
 
 from __future__ import annotations
@@ -53,7 +48,7 @@ import numpy as np
 
 
 # ---------------------------------------------------------------------------
-# Dataclass — kept for backward-compat (test_tracker.py uses Track fields)
+# Backward-compat dataclass
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -69,21 +64,20 @@ class Track:
 
 
 # ---------------------------------------------------------------------------
-# iou() — kept for backward-compat with test_tracker.py
+# Standalone iou() — kept for test_tracker.py backward-compat
 # ---------------------------------------------------------------------------
 
 def iou(a: tuple, b: tuple) -> float:
-    """Intersection over Union for two (x1, y1, x2, y2) boxes."""
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
-    ix1 = max(ax1, bx1);  iy1 = max(ay1, by1)
-    ix2 = min(ax2, bx2);  iy2 = min(ay2, by2)
+    ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2); iy2 = min(ay2, by2)
     inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
     if inter == 0:
         return 0.0
-    area_a = (ax2 - ax1) * (ay2 - ay1)
-    area_b = (bx2 - bx1) * (by2 - by1)
-    return inter / (area_a + area_b - inter)
+    a_ = (ax2 - ax1) * (ay2 - ay1)
+    b_ = (bx2 - bx1) * (by2 - by1)
+    return inter / (a_ + b_ - inter)
 
 
 # ---------------------------------------------------------------------------
@@ -92,52 +86,50 @@ def iou(a: tuple, b: tuple) -> float:
 
 class PlateTracker:
     """
-    BotSort-based plate tracker with deduplication (boxmot v16).
+    BotSort-backed plate tracker with guaranteed single-fire confirmation.
 
     Parameters
     ----------
     reid_weights : str | None
-        Path to ReID weights (.pt).  None → Kalman-only (no ReID).
+        Local path to ReID weights (.pt).  None → Kalman-only mode.
+        If the file doesn't exist, boxmot auto-downloads it.
     confirm_frames : int
-        Frames a track must be seen before "confirmed" fires. Default 3.
+        Track must be seen this many frames before "confirmed" fires.
+        Keep at 2 for short plate appearances (< 0.5 s at 30 fps).
     max_lost : int
-        Frames without a match before BotSort prunes the track. Default 30.
+        Frames without a match before the track is pruned.
     vote_thresh : float
-        Vote fraction the winning plate text must reach. Default 0.5.
+        Fraction of votes the winning plate text needs.  0.4 is fine
+        for noisy OCR — majority still wins but we don't need 50%+1.
     device : str
-        "cpu" or "cuda" / "cuda:0".
+        "cpu" or "cuda:0".
     track_high_thresh : float
-        High-conf detection threshold for first association. Default 0.50.
-    track_low_thresh : float
-        Low-conf detection threshold for second association. Default 0.10.
+        LOWER this if your YOLO model produces confs around 0.3–0.5.
+        Default 0.25 — matches the YOLO conf used in detect_video.py.
     new_track_thresh : float
-        Min confidence to start a new track. Default 0.60.
+        Must be >= track_high_thresh.  Lowered to 0.25 so new tracks
+        are created even at modest confidence.
     match_thresh : float
-        Combined IoU+cosine matching threshold. Default 0.80.
-    proximity_thresh : float
-        IoU gate for first association. Default 0.50.
-    appearance_thresh : float
-        Cosine distance gate for ReID. Default 0.25.
+        IoU+cosine combined gate.  0.85 gives more stable tracks.
     """
 
     def __init__(
         self,
         reid_weights:      Optional[str] = None,
-        confirm_frames:    int   = 3,
+        confirm_frames:    int   = 2,
         max_lost:          int   = 30,
-        vote_thresh:       float = 0.5,
+        vote_thresh:       float = 0.40,
         device:            str   = "cpu",
-        track_high_thresh: float = 0.50,
-        track_low_thresh:  float = 0.10,
-        new_track_thresh:  float = 0.60,
-        match_thresh:      float = 0.80,
-        proximity_thresh:  float = 0.50,
-        appearance_thresh: float = 0.25,
+        track_high_thresh: float = 0.25,
+        track_low_thresh:  float = 0.05,
+        new_track_thresh:  float = 0.25,
+        match_thresh:      float = 0.85,
+        proximity_thresh:  float = 0.35,
+        appearance_thresh: float = 0.30,
     ):
         self.confirm_frames = confirm_frames
         self.vote_thresh    = vote_thresh
 
-        # Per-track accumulators (keyed by BotSort track_id)
         self._votes:       Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._seen:        Dict[int, int]            = defaultdict(int)
         self._conf:        Dict[int, float]          = defaultdict(float)
@@ -149,11 +141,11 @@ class PlateTracker:
 
         try:
             import torch
-            from boxmot import BotSort          # boxmot v16 class name
+            from boxmot import BotSort
 
-            torch_device  = torch.device(device)
-            weights_path  = (Path(reid_weights) if reid_weights
-                             else Path("osnet_x0_25_msmt17.pt"))
+            torch_device = torch.device(device)
+            weights_path = (Path(reid_weights) if reid_weights
+                            else Path("osnet_x0_25_msmt17.pt"))
 
             self._tracker = BotSort(
                 reid_weights      = weights_path,
@@ -169,22 +161,22 @@ class PlateTracker:
                 with_reid         = (reid_weights is not None),
             )
             self._use_botsort = True
-            mode = "Kalman + ReID" if reid_weights else "Kalman-only (no ReID)"
-            print(f"[PlateTracker] BotSort loaded — {mode}  device={device}")
+            reid_mode = "Kalman + ReID" if reid_weights else "Kalman-only"
+            print(f"[PlateTracker] BotSort ready — {reid_mode}  device={device}")
+            print(f"[PlateTracker] thresholds: "
+                  f"high={track_high_thresh}  new={new_track_thresh}  "
+                  f"confirm={confirm_frames}frames")
 
         except ImportError as exc:
             print(
-                f"[PlateTracker] WARNING: boxmot import failed ({exc})\n"
+                f"[PlateTracker] WARNING: {exc}\n"
                 "  Falling back to IoU-only tracker.\n"
-                "  Fix with:  pip install boxmot>=16.0.0"
+                "  Fix: pip install boxmot>=16.0.0"
             )
             self._init_iou_fallback(proximity_thresh)
-
         except Exception as exc:
-            print(
-                f"[PlateTracker] WARNING: BotSort init failed — {exc}\n"
-                "  Falling back to IoU-only tracker."
-            )
+            print(f"[PlateTracker] WARNING: BotSort init failed — {exc}\n"
+                  "  Falling back to IoU-only tracker.")
             self._init_iou_fallback(proximity_thresh)
 
     def _init_iou_fallback(self, iou_thresh: float) -> None:
@@ -200,24 +192,19 @@ class PlateTracker:
     def update(
         self,
         detections: List[Tuple],
-        frame: Optional[np.ndarray] = None,
+        frame:      Optional[np.ndarray] = None,
     ) -> List[dict]:
         """
-        Update tracker with detections from the current frame.
+        Update tracker with this frame's detections.
 
         Parameters
         ----------
         detections : list of (x1, y1, x2, y2, conf, plate_text_or_None)
-        frame : np.ndarray | None
-            Current BGR frame — needed for ReID feature extraction.
-            Pass None to skip ReID.
+        frame      : current BGR frame (required for ReID; None = skip ReID)
 
         Returns
         -------
-        List of event dicts:
-            {"type": "confirmed", "track_id": int, "plate": str,
-             "conf": float, "bbox": (x1, y1, x2, y2)}
-            {"type": "lost",      "track_id": int, "plate": str}
+        List of {"type": "confirmed"|"lost", "track_id", "plate", "conf", "bbox"}
         """
         if self._use_botsort:
             return self._update_botsort(detections, frame)
@@ -225,7 +212,6 @@ class PlateTracker:
 
     @property
     def active_tracks(self) -> List[Track]:
-        """Currently active Track objects (compatibility shim)."""
         return [
             Track(
                 track_id  = tid,
@@ -239,7 +225,6 @@ class PlateTracker:
         ]
 
     def reset(self) -> None:
-        """Reset all state (call between unrelated video clips)."""
         if self._use_botsort:
             try:
                 self._tracker.reset()
@@ -256,34 +241,37 @@ class PlateTracker:
         self._prev_active.clear()
 
     # ------------------------------------------------------------------
-    # BotSort update path
+    # BotSort path
     # ------------------------------------------------------------------
 
     def _update_botsort(
         self,
         detections: List[Tuple],
-        frame: Optional[np.ndarray],
+        frame:      Optional[np.ndarray],
     ) -> List[dict]:
         events: List[dict] = []
 
         if frame is None:
             frame = np.zeros((2, 2, 3), dtype=np.uint8)
 
-        # Build  [x1, y1, x2, y2, conf, class_id]  detection array
-        plate_by_idx: Dict[int, str] = {}
+        # Build detection numpy array and plate-text side-table
+        plate_by_idx: Dict[int, str]                   = {}
+        det_bboxes:   List[Tuple[int,int,int,int]]     = []
+
         if detections:
             rows = []
             for i, det in enumerate(detections):
                 x1, y1, x2, y2, conf, plate = det
                 rows.append([float(x1), float(y1), float(x2), float(y2),
                               float(conf), 0.0])
+                det_bboxes.append((x1, y1, x2, y2))
                 if plate:
                     plate_by_idx[i] = plate
             dets_np = np.array(rows, dtype=np.float32)
         else:
             dets_np = np.empty((0, 6), dtype=np.float32)
 
-        # BotSort returns  [x1, y1, x2, y2, track_id, conf, cls, det_ind]
+        # Run BotSort — returns [x1, y1, x2, y2, track_id, conf, cls, det_ind]
         tracks = self._tracker.update(dets_np, frame)
 
         current_ids: set = set()
@@ -300,10 +288,30 @@ class PlateTracker:
                 self._conf[track_id]   = max(self._conf[track_id], conf)
                 self._bbox[track_id]   = (x1, y1, x2, y2)
 
-                if det_idx >= 0 and det_idx in plate_by_idx:
-                    self._votes[track_id][plate_by_idx[det_idx]] += 1
+                # --- Resolve plate text ---
+                # Primary: use det_ind from BotSort output
+                plate_text = None
+                if 0 <= det_idx < len(plate_by_idx):
+                    plate_text = plate_by_idx.get(det_idx)
 
-                # Fire "confirmed" exactly once per track
+                # Fallback: det_ind is -1 or out of range (re-activated lost
+                # track with no direct match) → find closest detection by IoU
+                if plate_text is None and det_bboxes:
+                    track_box = (x1, y1, x2, y2)
+                    best_iou  = 0.20   # minimum IoU to bother
+                    best_idx  = -1
+                    for di, db in enumerate(det_bboxes):
+                        s = iou(track_box, db)
+                        if s > best_iou:
+                            best_iou = s
+                            best_idx = di
+                    if best_idx >= 0:
+                        plate_text = plate_by_idx.get(best_idx)
+
+                if plate_text:
+                    self._votes[track_id][plate_text] += 1
+
+                # --- Emit confirmed exactly once ---
                 if (self._seen[track_id] >= self.confirm_frames
                         and track_id not in self._emitted):
                     best = self._consensus_plate(track_id)
@@ -346,7 +354,6 @@ class PlateTracker:
             x1, y1, x2, y2, conf, plate = det
             best_score = self._iou_thresh
             best_track = None
-
             for track in self._tracks_iou:
                 if track.track_id in matched_tracks:
                     continue
@@ -354,8 +361,7 @@ class PlateTracker:
                 if score > best_score:
                     best_score = score
                     best_track = track
-
-            if best_track is not None:
+            if best_track:
                 best_track.bbox = (x1, y1, x2, y2)
                 best_track.conf = max(best_track.conf, conf)
                 best_track.lost = 0

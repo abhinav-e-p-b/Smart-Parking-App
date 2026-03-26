@@ -3,26 +3,33 @@ detect_video.py — Run the ANPR pipeline on a video file.
 
 Architecture
 ------------
-Three-gate efficiency system keeps CPU usage low on long videos:
-  Gate 1 — Nth-frame sampler  : skip frames entirely
-  Gate 2 — Motion check       : skip static scenes (parked camera)
-  Gate 3 — YOLO + OCR + track : only on frames that pass both gates
+Three-gate efficiency system:
+  Gate 1 — Nth-frame sampler  : skip frames
+  Gate 2 — Motion check       : skip static scenes
+  Gate 3 — YOLO + OCR + track : only on moving frames
 
 Deduplication via BoT-SORT
 ---------------------------
-The old cooldown-counter approach is replaced by a PlateTracker backed
-by BoT-SORT.  Each physical plate receives one stable track ID for its
-entire lifetime in the video (Kalman filter predicts through occlusion,
-ReID re-identifies after re-entry).  A "confirmed" event fires EXACTLY
-ONCE per track ID, so the same plate is never written to the CSV twice
-regardless of how many frames it appears in.
+PlateTracker (BotSort, boxmot v16) assigns each physical plate one stable
+track ID via Kalman filter + optional ReID.  A "confirmed" event fires
+EXACTLY ONCE per track ID → same plate never written to CSV twice.
+
+Threshold notes (IMPORTANT)
+---------------------------
+  CONF_THRESH = 0.25   — keep low; BotSort has its own internal filter.
+                          Setting this too high (0.5) means few detections
+                          reach the tracker and tracks never accumulate
+                          enough frames to fire "confirmed".
+  CONFIRM_FRAMES = 2   — a plate visible for < 1 s at nth=3 / 59 fps
+                          only gets ~10 processed frames.  Requiring 3
+                          misses many valid readings.
 
 Usage
 -----
   python detect_video.py --source video.mp4
-  python detect_video.py --source video.mp4 --output outputs/result.mp4 --nth 3
-  python detect_video.py --source video.mp4 --show
+  python detect_video.py --source video.mp4 --output outputs/result.mp4
   python detect_video.py --source video.mp4 --reid osnet_x0_25_msmt17.pt
+  python detect_video.py --source video.mp4 --conf 0.25 --nth 2
 """
 
 import argparse
@@ -40,23 +47,23 @@ from utils.tracker import PlateTracker
 from utils.visualise import draw_detections, add_fps_overlay
 
 # ---------------------------------------------------------------------------
-# Defaults (override on the command line or via config.py)
+# Defaults
 # ---------------------------------------------------------------------------
-DEFAULT_MODEL    = "models/best.pt"
-CONF_THRESH      = 0.50
-IOU_THRESH       = 0.45
-OCR_MIN_CONF     = 0.30
-NTH_FRAME        = 3      # process every Nth frame
-MOTION_THRESH    = 15.0   # mean abs-diff threshold to consider a frame "moving"
-CONFIRM_FRAMES   = 3      # frames a track must be seen before confirming
-MAX_LOST         = 30     # frames without match before BoT-SORT prunes track
+DEFAULT_MODEL  = "models/best.pt"
+CONF_THRESH    = 0.25   # Low — BotSort does its own internal filtering
+IOU_THRESH     = 0.45
+OCR_MIN_CONF   = 0.15   # Low — let the validator reject bad reads, not conf
+NTH_FRAME      = 3
+MOTION_THRESH  = 15.0
+CONFIRM_FRAMES = 2      # 2 frames is enough; plates appear briefly
+MAX_LOST       = 30
 
 
 def process_video(
     source:        str,
     model_path:    str   = DEFAULT_MODEL,
     conf:          float = CONF_THRESH,
-    iou:           float = IOU_THRESH,
+    iou_thresh:    float = IOU_THRESH,
     nth:           int   = NTH_FRAME,
     motion_thresh: float = MOTION_THRESH,
     reid_weights:  str   = None,
@@ -67,9 +74,7 @@ def process_video(
     """
     Run ANPR on a video file.
 
-    Returns
-    -------
-    List of confirmed-plate dicts:
+    Returns list of confirmed-plate dicts:
         [{"frame", "timestamp_s", "plate", "det_conf", "bbox"}, ...]
     """
 
@@ -87,7 +92,8 @@ def process_video(
 
     print(f"Video      : {source}")
     print(f"Resolution : {width}×{height}  |  FPS: {fps_in:.1f}  |  Frames: {total_frames}")
-    print(f"Mode       : nth={nth}  motion_thresh={motion_thresh}  confirm={CONFIRM_FRAMES}")
+    print(f"Settings   : conf={conf}  nth={nth}  motion_thresh={motion_thresh}  "
+          f"confirm={CONFIRM_FRAMES}frames")
 
     # ------------------------------------------------------------------
     # Video writer
@@ -102,17 +108,23 @@ def process_video(
     # Models
     # ------------------------------------------------------------------
     detector = YOLO(model_path)
-    reader   = PlateReader(gpu=False)   # set gpu=True if CUDA available
+    reader   = PlateReader(gpu=False)
 
     # ------------------------------------------------------------------
-    # BoT-SORT tracker
+    # BoT-SORT tracker — thresholds match CONF_THRESH above
     # ------------------------------------------------------------------
     tracker = PlateTracker(
-        reid_weights   = reid_weights,
-        confirm_frames = CONFIRM_FRAMES,
-        max_lost       = MAX_LOST,
-        vote_thresh    = 0.5,
-        device         = "cpu",
+        reid_weights      = reid_weights,
+        confirm_frames    = CONFIRM_FRAMES,
+        max_lost          = MAX_LOST,
+        vote_thresh       = 0.40,      # relaxed — OCR is noisy
+        device            = "cpu",
+        track_high_thresh = conf,      # must match YOLO conf
+        track_low_thresh  = 0.05,
+        new_track_thresh  = conf,      # must match YOLO conf
+        match_thresh      = 0.85,
+        proximity_thresh  = 0.35,
+        appearance_thresh = 0.30,
     )
 
     # ------------------------------------------------------------------
@@ -126,21 +138,17 @@ def process_video(
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow([
             "frame", "timestamp_s", "plate", "det_conf",
-            "x1", "y1", "x2", "y2"
+            "x1", "y1", "x2", "y2",
         ])
 
     # ------------------------------------------------------------------
-    # Processing state
+    # State
     # ------------------------------------------------------------------
     frame_id      = 0
     prev_gray     = None
-    all_confirmed = []       # confirmed plate records written to CSV / returned
+    all_confirmed = []
     fps_display   = 0.0
     fps_timer     = time.perf_counter()
-
-    # Per-frame annotation state (used only for drawing, not dedup)
-    last_det_list    = []
-    last_plate_texts = []
 
     # ------------------------------------------------------------------
     # Main loop
@@ -153,17 +161,13 @@ def process_video(
 
             frame_id += 1
 
-            # ----------------------------------------------------------------
             # Gate 1 — Nth-frame sampler
-            # ----------------------------------------------------------------
             if frame_id % nth != 0:
                 if writer:
                     writer.write(frame)
                 continue
 
-            # ----------------------------------------------------------------
             # Gate 2 — Motion check
-            # ----------------------------------------------------------------
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             if prev_gray is not None:
                 diff = cv2.absdiff(gray, prev_gray).mean()
@@ -174,16 +178,13 @@ def process_video(
                     continue
             prev_gray = gray
 
-            # ----------------------------------------------------------------
-            # Gate 3 — YOLO detection + OCR
-            # ----------------------------------------------------------------
-            yolo_results = detector(frame, conf=conf, iou=iou, verbose=False)
-            boxes        = yolo_results[0].boxes
+            # Gate 3 — YOLO + OCR
+            yolo_res = detector(frame, conf=conf, iou=iou_thresh, verbose=False)
+            boxes    = yolo_res[0].boxes
 
-            # Collect raw detections for the tracker
             raw_dets:    list = []
-            det_list:    list = []    # for draw_detections()
-            plate_texts: list = []    # for draw_detections()
+            det_list:    list = []
+            plate_texts: list = []
 
             for box in boxes:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
@@ -199,51 +200,41 @@ def process_video(
                 det_list.append((x1, y1, x2, y2, det_conf))
                 plate_texts.append(plate_text)
 
-            # ----------------------------------------------------------------
-            # BoT-SORT update
-            # Pass the full frame so BoT-SORT can extract ReID features.
-            # Events fire at most once per unique physical plate.
-            # ----------------------------------------------------------------
+            # BotSort update — dedup guaranteed
             events = tracker.update(raw_dets, frame)
 
             for event in events:
                 if event["type"] == "confirmed":
-                    plate_text = event["plate"]
-                    timestamp  = round(frame_id / fps_in, 2)
+                    plate     = event["plate"]
+                    timestamp = round(frame_id / fps_in, 2)
                     x1, y1, x2, y2 = event["bbox"]
 
                     record = {
                         "frame":       frame_id,
                         "timestamp_s": timestamp,
-                        "plate":       plate_text,
+                        "plate":       plate,
                         "det_conf":    round(event["conf"], 3),
                         "bbox":        (x1, y1, x2, y2),
                     }
                     all_confirmed.append(record)
 
-                    print(
-                        f"  [frame {frame_id:06d}]  t={timestamp:.1f}s  "
-                        f"plate={plate_text}  conf={event['conf']:.2f}  "
-                        f"track_id={event['track_id']}"
-                    )
+                    print(f"  ✓ [frame {frame_id:06d}]  t={timestamp:.1f}s  "
+                          f"plate={plate}  conf={event['conf']:.2f}  "
+                          f"track_id={event['track_id']}")
 
                     if csv_writer:
                         csv_writer.writerow([
-                            frame_id, timestamp, plate_text,
+                            frame_id, timestamp, plate,
                             round(event["conf"], 3),
                             x1, y1, x2, y2,
                         ])
 
-            # ----------------------------------------------------------------
             # FPS
-            # ----------------------------------------------------------------
             now         = time.perf_counter()
             fps_display = 1.0 / max(now - fps_timer, 1e-6)
             fps_timer   = now
 
-            # ----------------------------------------------------------------
-            # Annotate + write output
-            # ----------------------------------------------------------------
+            # Annotate + write
             annotated = draw_detections(frame, det_list, plate_texts)
             annotated = add_fps_overlay(annotated, fps_display)
 
@@ -268,8 +259,10 @@ def process_video(
     # Summary
     # ------------------------------------------------------------------
     print(f"\n{'='*55}")
-    print(f"Processed  : {frame_id} frames")
-    print(f"Unique plates confirmed : {len(all_confirmed)}")
+    print(f"Processed frames   : {frame_id}")
+    print(f"Unique plates found: {len(all_confirmed)}")
+    for r in all_confirmed:
+        print(f"  {r['plate']}  t={r['timestamp_s']}s  conf={r['det_conf']}")
     if output:
         print(f"Output video : {output}")
     if save_csv:
@@ -284,31 +277,29 @@ def process_video(
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Indian ANPR — video")
-    parser.add_argument("--source",       required=True,
-                        help="Path to input video file")
-    parser.add_argument("--model",        default=DEFAULT_MODEL)
-    parser.add_argument("--conf",         type=float, default=CONF_THRESH)
-    parser.add_argument("--iou",          type=float, default=IOU_THRESH)
-    parser.add_argument("--nth",          type=int,   default=NTH_FRAME,
-                        help="Process every Nth frame (default: 3)")
-    parser.add_argument("--motion-thresh",type=float, default=MOTION_THRESH)
-    parser.add_argument("--reid",         default=None, dest="reid_weights",
-                        help="Path to ReID weights (e.g. osnet_x0_25_msmt17.pt). "
-                             "Omit for Kalman-only mode.")
-    parser.add_argument("--show",         action="store_true",
-                        help="Display annotated video in a window")
-    parser.add_argument("--output",       default=None,
+    parser = argparse.ArgumentParser(description="Indian ANPR — video (BoT-SORT)")
+    parser.add_argument("--source",        required=True)
+    parser.add_argument("--model",         default=DEFAULT_MODEL)
+    parser.add_argument("--conf",          type=float, default=CONF_THRESH,
+                        help="YOLO detection confidence threshold (default 0.25)")
+    parser.add_argument("--iou",           type=float, default=IOU_THRESH)
+    parser.add_argument("--nth",           type=int,   default=NTH_FRAME,
+                        help="Process every Nth frame (default 3)")
+    parser.add_argument("--motion-thresh", type=float, default=MOTION_THRESH)
+    parser.add_argument("--reid",          default=None, dest="reid_weights",
+                        help="Path to ReID weights (e.g. osnet_x0_25_msmt17.pt)")
+    parser.add_argument("--show",          action="store_true")
+    parser.add_argument("--output",        default=None,
                         help="Save annotated video here")
-    parser.add_argument("--csv",          default=None, dest="save_csv",
-                        help="Save confirmed plate log as CSV")
+    parser.add_argument("--csv",           default=None, dest="save_csv",
+                        help="Save confirmed plates as CSV")
     args = parser.parse_args()
 
     process_video(
         source        = args.source,
         model_path    = args.model,
         conf          = args.conf,
-        iou           = args.iou,
+        iou_thresh    = args.iou,
         nth           = args.nth,
         motion_thresh = args.motion_thresh,
         reid_weights  = args.reid_weights,
