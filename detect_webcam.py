@@ -1,7 +1,8 @@
 """
 detect_webcam.py — Real-time ANPR from webcam or IP camera.
 
-Thresholds match detect_video.py — see notes there.
+Thresholds imported from utils/constants.py — shared with detect_video.py
+so behaviour is consistent across modes.
 
 Usage
 -----
@@ -30,16 +31,14 @@ from utils.preprocess import preprocess_plate
 from utils.ocr import PlateReader
 from utils.tracker import PlateTracker
 from utils.visualise import draw_detections, add_fps_overlay
+from utils.constants import (
+    CONF_THRESH, IOU_THRESH, OCR_MIN_CONF,
+    WEBCAM_NTH_FRAME, WEBCAM_MOTION_THRESH,
+    CONFIRM_FRAMES, MAX_LOST,
+)
 
-DEFAULT_MODEL  = "models/best.pt"
-CONF_THRESH    = 0.25   # keep low — BotSort filters internally
-IOU_THRESH     = 0.45
-OCR_MIN_CONF   = 0.15
-NTH_FRAME      = 2
-MOTION_THRESH  = 12.0
-CONFIRM_FRAMES = 2
-MAX_LOST       = 30
-LOG_MAXLEN     = 10
+DEFAULT_MODEL = "models/best.pt"
+LOG_MAXLEN    = 10
 
 
 def run_webcam(
@@ -81,6 +80,7 @@ def run_webcam(
 
     print(f"Webcam ANPR ready. Source={source}  "
           f"ReID={'on' if reid_weights else 'off'}")
+    print(f"OCR min conf: {OCR_MIN_CONF}  Detection conf: {conf}")
     print("Controls: q=quit  s=save frame  r=reset")
 
     while True:
@@ -92,7 +92,7 @@ def run_webcam(
         frame_id += 1
 
         # Gate 1
-        if frame_id % NTH_FRAME != 0:
+        if frame_id % WEBCAM_NTH_FRAME != 0:
             cv2.imshow("Indian ANPR — Webcam", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
@@ -102,7 +102,7 @@ def run_webcam(
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if prev_gray is not None:
             diff = cv2.absdiff(gray, prev_gray).mean()
-            if diff < MOTION_THRESH:
+            if diff < WEBCAM_MOTION_THRESH:
                 prev_gray = gray
                 cv2.imshow("Indian ANPR — Webcam", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):

@@ -6,7 +6,7 @@ Deduplication
 For images (static), BoT-SORT's temporal tracking is not applicable —
 each image is independent.  Deduplication here means:
   1. Within one image: only the highest-confidence valid plate per
-     bounding box cluster is reported (unchanged from original).
+     bounding box cluster is reported.
   2. Across the whole batch: a global seen-plates set prevents the
      same plate string from appearing more than once in the CSV output.
      Toggle with --allow-duplicates if you need the raw repeat counts.
@@ -31,14 +31,12 @@ from ultralytics import YOLO
 from utils.preprocess import preprocess_plate
 from utils.ocr import PlateReader
 from utils.visualise import draw_detections
+from utils.constants import CONF_THRESH, IOU_THRESH, OCR_MIN_CONF
 
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
 DEFAULT_MODEL = "models/best.pt"
-CONF_THRESH   = 0.50
-IOU_THRESH    = 0.45
-OCR_MIN_CONF  = 0.30
 IMG_EXTS      = {".jpg", ".jpeg", ".png", ".bmp"}
 
 
@@ -82,18 +80,17 @@ def process_single(
             continue
 
         processed  = preprocess_plate(crop)
+        # OCR_MIN_CONF now imported from constants — same value as video/webcam
         plate_text = reader.read(processed, min_conf=OCR_MIN_CONF)
 
         det_list.append((x1, y1, x2, y2, det_conf))
         plate_texts.append(plate_text)
 
-        # Keep the validated plate with the highest detection confidence
         if plate_text and det_conf > best_conf:
             best_plate = plate_text
             best_conf  = det_conf
             best_bbox  = (x1, y1, x2, y2)
 
-    # Save annotated image if an output directory was specified
     if output_dir is not None and det_list:
         annotated = draw_detections(img, det_list, plate_texts)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -146,16 +143,16 @@ def run_batch(
         return []
 
     print(f"Batch ANPR")
-    print(f"  Source   : {src}  ({len(images)} images)")
-    print(f"  Model    : {model_path}  conf={conf}  iou={iou_thresh}")
-    print(f"  Workers  : {workers}")
-    print(f"  Dedup    : {'off (allow-duplicates)' if allow_duplicates else 'on (unique plates only)'}")
+    print(f"  Source      : {src}  ({len(images)} images)")
+    print(f"  Model       : {model_path}  conf={conf}  iou={iou_thresh}")
+    print(f"  OCR min conf: {OCR_MIN_CONF}")
+    print(f"  Workers     : {workers}")
+    print(f"  Dedup       : {'off (allow-duplicates)' if allow_duplicates else 'on (unique plates only)'}")
 
     detector   = YOLO(model_path)
-    reader     = PlateReader(gpu=False)   # set gpu=True if CUDA available
+    reader     = PlateReader(gpu=False)
     output_dir = Path(output) if output else None
 
-    # Global deduplication across all images in the batch
     seen_plates: set = set()
 
     t0          = time.perf_counter()
@@ -166,7 +163,7 @@ def run_batch(
         plate  = result.get("plate")
         if plate and not allow_duplicates:
             if plate in seen_plates:
-                result["plate"]     = None   # suppress duplicate
+                result["plate"]     = None
                 result["det_conf"]  = None
                 result["note"]      = f"duplicate_of_earlier_{plate}"
             else:
@@ -174,8 +171,6 @@ def run_batch(
         return result
 
     if workers > 1:
-        # Threading helps with disk I/O; YOLO and EasyOCR are single-threaded
-        # internally, so true parallelism is limited on CPU-only machines.
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(_process_and_dedup, p): p for p in images
@@ -206,9 +201,6 @@ def run_batch(
     print(f"Avg speed      : {elapsed / len(all_results) * 1000:.0f}ms / image")
     print(f"{'='*55}")
 
-    # ------------------------------------------------------------------
-    # Write CSV
-    # ------------------------------------------------------------------
     if save_csv:
         Path(save_csv).parent.mkdir(parents=True, exist_ok=True)
         fieldnames = ["file", "plate", "det_conf", "n_detections", "error", "note"]

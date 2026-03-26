@@ -10,19 +10,9 @@ Three-gate efficiency system:
 
 Deduplication via BoT-SORT
 ---------------------------
-PlateTracker (BotSort, boxmot v16) assigns each physical plate one stable
+PlateTracker (BotSort, boxmot) assigns each physical plate one stable
 track ID via Kalman filter + optional ReID.  A "confirmed" event fires
 EXACTLY ONCE per track ID → same plate never written to CSV twice.
-
-Threshold notes (IMPORTANT)
----------------------------
-  CONF_THRESH = 0.25   — keep low; BotSort has its own internal filter.
-                          Setting this too high (0.5) means few detections
-                          reach the tracker and tracks never accumulate
-                          enough frames to fire "confirmed".
-  CONFIRM_FRAMES = 2   — a plate visible for < 1 s at nth=3 / 59 fps
-                          only gets ~10 processed frames.  Requiring 3
-                          misses many valid readings.
 
 Usage
 -----
@@ -45,18 +35,12 @@ from utils.preprocess import preprocess_plate
 from utils.ocr import PlateReader
 from utils.tracker import PlateTracker
 from utils.visualise import draw_detections, add_fps_overlay
+from utils.constants import (
+    CONF_THRESH, IOU_THRESH, OCR_MIN_CONF,
+    NTH_FRAME, MOTION_THRESH, CONFIRM_FRAMES, MAX_LOST,
+)
 
-# ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
-DEFAULT_MODEL  = "models/best.pt"
-CONF_THRESH    = 0.25   # Low — BotSort does its own internal filtering
-IOU_THRESH     = 0.45
-OCR_MIN_CONF   = 0.15   # Low — let the validator reject bad reads, not conf
-NTH_FRAME      = 3
-MOTION_THRESH  = 15.0
-CONFIRM_FRAMES = 2      # 2 frames is enough; plates appear briefly
-MAX_LOST       = 30
+DEFAULT_MODEL = "models/best.pt"
 
 
 def process_video(
@@ -93,7 +77,7 @@ def process_video(
     print(f"Video      : {source}")
     print(f"Resolution : {width}×{height}  |  FPS: {fps_in:.1f}  |  Frames: {total_frames}")
     print(f"Settings   : conf={conf}  nth={nth}  motion_thresh={motion_thresh}  "
-          f"confirm={CONFIRM_FRAMES}frames")
+          f"confirm={CONFIRM_FRAMES}frames  ocr_min_conf={OCR_MIN_CONF}")
 
     # ------------------------------------------------------------------
     # Video writer
@@ -111,17 +95,17 @@ def process_video(
     reader   = PlateReader(gpu=False)
 
     # ------------------------------------------------------------------
-    # BoT-SORT tracker — thresholds match CONF_THRESH above
+    # BoT-SORT tracker
     # ------------------------------------------------------------------
     tracker = PlateTracker(
         reid_weights      = reid_weights,
         confirm_frames    = CONFIRM_FRAMES,
         max_lost          = MAX_LOST,
-        vote_thresh       = 0.40,      # relaxed — OCR is noisy
+        vote_thresh       = 0.40,
         device            = "cpu",
-        track_high_thresh = conf,      # must match YOLO conf
+        track_high_thresh = conf,
         track_low_thresh  = 0.05,
-        new_track_thresh  = conf,      # must match YOLO conf
+        new_track_thresh  = conf,
         match_thresh      = 0.85,
         proximity_thresh  = 0.35,
         appearance_thresh = 0.30,
@@ -281,10 +265,10 @@ if __name__ == "__main__":
     parser.add_argument("--source",        required=True)
     parser.add_argument("--model",         default=DEFAULT_MODEL)
     parser.add_argument("--conf",          type=float, default=CONF_THRESH,
-                        help="YOLO detection confidence threshold (default 0.25)")
+                        help=f"YOLO detection confidence threshold (default {CONF_THRESH})")
     parser.add_argument("--iou",           type=float, default=IOU_THRESH)
     parser.add_argument("--nth",           type=int,   default=NTH_FRAME,
-                        help="Process every Nth frame (default 3)")
+                        help=f"Process every Nth frame (default {NTH_FRAME})")
     parser.add_argument("--motion-thresh", type=float, default=MOTION_THRESH)
     parser.add_argument("--reid",          default=None, dest="reid_weights",
                         help="Path to ReID weights (e.g. osnet_x0_25_msmt17.pt)")

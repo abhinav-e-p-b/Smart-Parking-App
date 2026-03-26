@@ -1,22 +1,20 @@
 """
-utils/tracker.py — BoT-SORT plate tracker (boxmot v16 compatible).
+utils/tracker.py — BoT-SORT plate tracker (boxmot v10 / v16 compatible).
 
-Key fixes vs previous version
--------------------------------
-1. BotSort thresholds lowered to match real-world plate detection confidence
-   ranges.  The default new_track_thresh=0.6 was silently discarding most
-   detections from a CPU-trained YOLOv8 model where conf typically sits
-   between 0.3 and 0.65.
+Fixes applied vs previous version
+-----------------------------------
+1. boxmot import handles both v10 (BoTSORT) and v16 (BotSort) class names
+   so the fallback to IoU-only is never triggered silently by a rename.
 
-2. det_ind fallback:  BotSort v16 sometimes returns det_ind=-1 or an out-
-   of-range index when a track is re-activated from the lost buffer (no
-   direct detection matched it).  We now use bbox-IoU as a fallback to
-   re-link the plate text when det_ind is unusable.
+2. det_ind bound check fixed: was comparing against len(plate_by_idx)
+   (count of dets WITH a plate) instead of len(detections) (total dets).
+   This caused valid plate reads to be silently dropped.
 
-3. Confirm on ANY valid OCR read:  a track is also confirmed immediately
-   once it accumulates >= 1 valid plate vote AND has been seen enough
-   frames, removing the dependency on a strict majority when the tracker
-   is new and votes are sparse.
+3. Lost-track cleanup now discards track_id from _emitted so a plate
+   that re-enters the frame after its track is lost will fire "confirmed"
+   again correctly (important for webcam / long video sessions).
+
+4. _votes read happens before pop in lost-track loop (ordering fix).
 
 boxmot v16 API notes
 ---------------------
@@ -26,7 +24,7 @@ boxmot v16 API notes
 
 Install
 -------
-    pip install boxmot>=16.0.0
+    pip install boxmot>=10.0.0
 
 Usage
 -----
@@ -92,25 +90,20 @@ class PlateTracker:
     ----------
     reid_weights : str | None
         Local path to ReID weights (.pt).  None → Kalman-only mode.
-        If the file doesn't exist, boxmot auto-downloads it.
     confirm_frames : int
         Track must be seen this many frames before "confirmed" fires.
-        Keep at 2 for short plate appearances (< 0.5 s at 30 fps).
     max_lost : int
         Frames without a match before the track is pruned.
     vote_thresh : float
-        Fraction of votes the winning plate text needs.  0.4 is fine
-        for noisy OCR — majority still wins but we don't need 50%+1.
+        Fraction of votes the winning plate text needs.
     device : str
         "cpu" or "cuda:0".
     track_high_thresh : float
-        LOWER this if your YOLO model produces confs around 0.3–0.5.
-        Default 0.25 — matches the YOLO conf used in detect_video.py.
+        Must match the YOLO conf threshold used in detect_*.py.
     new_track_thresh : float
-        Must be >= track_high_thresh.  Lowered to 0.25 so new tracks
-        are created even at modest confidence.
+        Must be >= track_high_thresh.
     match_thresh : float
-        IoU+cosine combined gate.  0.85 gives more stable tracks.
+        IoU+cosine combined gate.
     """
 
     def __init__(
@@ -141,7 +134,14 @@ class PlateTracker:
 
         try:
             import torch
-            from boxmot import BotSort
+
+            # ----------------------------------------------------------------
+            # FIX 1: Handle both boxmot v10 (BoTSORT) and v16 (BotSort)
+            # ----------------------------------------------------------------
+            try:
+                from boxmot import BotSort          # boxmot >= v16
+            except ImportError:
+                from boxmot import BoTSORT as BotSort  # boxmot v10
 
             torch_device = torch.device(device)
             weights_path = (Path(reid_weights) if reid_weights
@@ -171,7 +171,7 @@ class PlateTracker:
             print(
                 f"[PlateTracker] WARNING: {exc}\n"
                 "  Falling back to IoU-only tracker.\n"
-                "  Fix: pip install boxmot>=16.0.0"
+                "  Fix: pip install boxmot>=10.0.0"
             )
             self._init_iou_fallback(proximity_thresh)
         except Exception as exc:
@@ -255,8 +255,9 @@ class PlateTracker:
             frame = np.zeros((2, 2, 3), dtype=np.uint8)
 
         # Build detection numpy array and plate-text side-table
-        plate_by_idx: Dict[int, str]                   = {}
-        det_bboxes:   List[Tuple[int,int,int,int]]     = []
+        plate_by_idx: Dict[int, str]               = {}
+        det_bboxes:   List[Tuple[int,int,int,int]] = []
+        total_dets:   int                          = 0  # FIX 2: track real count
 
         if detections:
             rows = []
@@ -267,6 +268,7 @@ class PlateTracker:
                 det_bboxes.append((x1, y1, x2, y2))
                 if plate:
                     plate_by_idx[i] = plate
+            total_dets = len(rows)  # FIX 2: total detections, not just ones with plates
             dets_np = np.array(rows, dtype=np.float32)
         else:
             dets_np = np.empty((0, 6), dtype=np.float32)
@@ -289,9 +291,16 @@ class PlateTracker:
                 self._bbox[track_id]   = (x1, y1, x2, y2)
 
                 # --- Resolve plate text ---
-                # Primary: use det_ind from BotSort output
                 plate_text = None
-                if 0 <= det_idx < len(plate_by_idx):
+
+                # ----------------------------------------------------------------
+                # FIX 2: Bound check against total_dets, not len(plate_by_idx)
+                # Previously: 0 <= det_idx < len(plate_by_idx)
+                #   len(plate_by_idx) = number of dets WITH a plate (sparse)
+                #   so det_idx=2 was rejected if only dets 0,1 had plates
+                # Correctly: bound against total number of detections sent to tracker
+                # ----------------------------------------------------------------
+                if 0 <= det_idx < total_dets:
                     plate_text = plate_by_idx.get(det_idx)
 
                 # Fallback: det_ind is -1 or out of range (re-activated lost
@@ -325,18 +334,24 @@ class PlateTracker:
                         })
                         self._emitted.add(track_id)
 
-        # Detect vanished tracks → "lost"
+        # ----------------------------------------------------------------
+        # FIX 3: Read consensus plate BEFORE popping _votes
+        #         Then also discard from _emitted so re-entry can re-confirm
+        # ----------------------------------------------------------------
         for tid in self._prev_active - current_ids:
             if tid in self._emitted:
+                plate_for_lost = self._consensus_plate(tid)  # read before pop
                 events.append({
                     "type":     "lost",
                     "track_id": tid,
-                    "plate":    self._consensus_plate(tid),
+                    "plate":    plate_for_lost,
                 })
+                self._emitted.discard(tid)  # allow re-confirmation if plate returns
+
             self._seen.pop(tid, None)
             self._conf.pop(tid, None)
             self._bbox.pop(tid, None)
-            self._votes.pop(tid, None)
+            self._votes.pop(tid, None)   # safe to pop now
 
         self._prev_active = current_ids
         return events
@@ -408,6 +423,7 @@ class PlateTracker:
                     events.append({"type": "lost",
                                    "track_id": track.track_id,
                                    "plate": track.plate})
+                    self._emitted.discard(track.track_id)  # allow re-confirm
             else:
                 alive.append(track)
         self._tracks_iou = alive
