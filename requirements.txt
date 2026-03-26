@@ -1,0 +1,25 @@
+# Core detection & OCR
+ultralytics>=8.0.0
+easyocr>=1.7.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+Pillow>=9.5.0
+
+# Deep learning backend (CPU-only — remove +cpu suffix and uncomment GPU line for CUDA)
+torch>=2.0.0+cpu
+torchvision>=0.15.0+cpu
+# torch>=2.0.0          # GPU version
+# torchvision>=0.15.0   # GPU version
+
+# BoT-SORT tracker — provides Kalman filter + ReID-based deduplication
+# Includes BoTSORT, ByteTrack, StrongSORT under one package
+boxmot>=10.0.0
+
+# Dataset & training utilities
+kagglehub>=0.2.0
+albumentations>=1.3.0
+tqdm>=4.65.0
+pyyaml>=6.0
+matplotlib>=3.7.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
