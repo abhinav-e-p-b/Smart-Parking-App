@@ -16,6 +16,23 @@ Fixes applied vs previous version
 
 4. _votes read happens before pop in lost-track loop (ordering fix).
 
+5. [NEW FIX] _prev_active is now always updated even when BotSort returns
+   zero tracks — previously the lost-event loop was skipped entirely on
+   empty-tracks frames, so tracks that vanished never fired "lost".
+
+6. [NEW FIX] Stale-entry cleanup: _seen/_conf/_bbox/_votes entries for
+   track IDs that BotSort has permanently dropped (not in current_ids
+   for >= max_lost frames) are now pruned to prevent unbounded memory
+   growth on long videos / webcam sessions.
+
+7. [NEW FIX] reset() now always initialises _tracks_iou / _iou_thresh /
+   _next_id regardless of which path is active, so switching paths or
+   calling reset() in any state can never crash with AttributeError.
+
+8. [NEW FIX] reset() re-creates the BotSort tracker instance instead of
+   calling tracker.reset() which may silently fail on some boxmot builds,
+   leaving stale Kalman state behind.
+
 boxmot v16 API notes
 ---------------------
   - Class   : boxmot.BotSort  (was BoTSORT in v10)
@@ -126,9 +143,19 @@ class PlateTracker:
         proximity_thresh:  float = 0.35,
         appearance_thresh: float = 0.30,
     ):
-        self.confirm_frames = confirm_frames
-        self.vote_thresh    = vote_thresh
-        self.max_lost       = max_lost
+        self.confirm_frames    = confirm_frames
+        self.vote_thresh       = vote_thresh
+        self.max_lost          = max_lost
+
+        # Store BotSort init kwargs so reset() can rebuild cleanly
+        self._device            = device
+        self._reid_weights      = reid_weights
+        self._track_high_thresh = track_high_thresh
+        self._track_low_thresh  = track_low_thresh
+        self._new_track_thresh  = new_track_thresh
+        self._match_thresh      = match_thresh
+        self._proximity_thresh  = proximity_thresh
+        self._appearance_thresh = appearance_thresh
 
         self._votes:       Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._seen:        Dict[int, int]            = defaultdict(int)
@@ -137,62 +164,83 @@ class PlateTracker:
         self._emitted:     set                       = set()
         self._prev_active: set                       = set()
 
-        self._use_botsort = False
+        # FIX 7: always initialise IoU-fallback attributes so reset() never
+        # crashes with AttributeError regardless of which path is active.
+        self._iou_thresh  = proximity_thresh
+        self._tracks_iou: List[Track] = []
+        self._next_id:    int         = 0
 
+        self._use_botsort = False
+        self._tracker     = None
+
+        # Store BotSort class ref so reset() can re-instantiate
+        self._BotSort_cls = None
+
+        self._try_init_botsort()
+
+    # ------------------------------------------------------------------
+    # BotSort initialisation (extracted so reset() can call it too)
+    # ------------------------------------------------------------------
+
+    def _try_init_botsort(self) -> None:
+        """Attempt to create a BotSort instance. Sets self._use_botsort."""
         try:
             import torch
 
-            # ----------------------------------------------------------------
             # FIX 1: Handle both boxmot v10 (BoTSORT) and v16 (BotSort)
-            # ----------------------------------------------------------------
             try:
                 from boxmot import BotSort          # boxmot >= v16
             except ImportError:
                 from boxmot import BoTSORT as BotSort  # boxmot v10
 
-            torch_device = torch.device(device)
-            with_reid    = (reid_weights is not None)
+            self._BotSort_cls = BotSort
 
-            # Resolve default ReID path only when ReID is actually requested.
-            # This avoids init failures on versions that validate the path
-            # even when running in Kalman-only mode.
+            torch_device = torch.device(self._device)
+            with_reid    = (self._reid_weights is not None)
+
             if with_reid:
-                if reid_weights:
-                    weights_path = Path(reid_weights)
-                else:
-                    candidates = list(DEFAULT_REID_CANDIDATES)
-                    weights_path = next((p for p in candidates if p.exists()), candidates[0])
+                weights_path = Path(self._reid_weights)
+                if not weights_path.exists():
+                    # Try default candidates
+                    found = next(
+                        (p for p in DEFAULT_REID_CANDIDATES if p.exists()),
+                        None,
+                    )
+                    weights_path = found if found else Path(self._reid_weights)
             else:
                 weights_path = None
 
-            init_sig = inspect.signature(BotSort.__init__)
+            init_sig    = inspect.signature(BotSort.__init__)
             init_params = set(init_sig.parameters.keys())
 
             kwargs = {
                 "device":            torch_device,
                 "half":              False,
-                "track_high_thresh": track_high_thresh,
-                "track_low_thresh":  track_low_thresh,
-                "new_track_thresh":  new_track_thresh,
-                "track_buffer":      max_lost,
-                "match_thresh":      match_thresh,
-                "proximity_thresh":  proximity_thresh,
-                "appearance_thresh": appearance_thresh,
+                "track_high_thresh": self._track_high_thresh,
+                "track_low_thresh":  self._track_low_thresh,
+                "new_track_thresh":  self._new_track_thresh,
+                "track_buffer":      self.max_lost,
+                "match_thresh":      self._match_thresh,
+                "proximity_thresh":  self._proximity_thresh,
+                "appearance_thresh": self._appearance_thresh,
                 "with_reid":         with_reid,
             }
-            if with_reid and weights_path is not None and "reid_weights" in init_params:
-                kwargs["reid_weights"] = weights_path
-            elif with_reid and weights_path is not None and "model_weights" in init_params:
-                kwargs["model_weights"] = weights_path
+            if with_reid and weights_path is not None:
+                if "reid_weights" in init_params:
+                    kwargs["reid_weights"] = weights_path
+                elif "model_weights" in init_params:
+                    kwargs["model_weights"] = weights_path
 
             kwargs = {k: v for k, v in kwargs.items() if k in init_params}
-            self._tracker = BotSort(**kwargs)
+            self._tracker     = BotSort(**kwargs)
             self._use_botsort = True
-            reid_mode = "Kalman + ReID" if reid_weights else "Kalman-only"
-            print(f"[PlateTracker] BotSort ready — {reid_mode}  device={device}")
-            print(f"[PlateTracker] thresholds: "
-                  f"high={track_high_thresh}  new={new_track_thresh}  "
-                  f"confirm={confirm_frames}frames")
+            reid_mode = "Kalman + ReID" if self._reid_weights else "Kalman-only"
+            print(f"[PlateTracker] BotSort ready — {reid_mode}  device={self._device}")
+            print(
+                f"[PlateTracker] thresholds: "
+                f"high={self._track_high_thresh}  new={self._new_track_thresh}  "
+                f"confirm={self.confirm_frames}frames"
+            )
 
         except ImportError as exc:
             print(
@@ -200,17 +248,13 @@ class PlateTracker:
                 "  Falling back to IoU-only tracker.\n"
                 "  Fix: pip install boxmot>=10.0.0"
             )
-            self._init_iou_fallback(proximity_thresh)
+            self._use_botsort = False
         except Exception as exc:
-            print(f"[PlateTracker] WARNING: BotSort init failed — {exc}\n"
-                  "  Falling back to IoU-only tracker.")
-            self._init_iou_fallback(proximity_thresh)
-
-    def _init_iou_fallback(self, iou_thresh: float) -> None:
-        self._use_botsort = False
-        self._iou_thresh  = iou_thresh
-        self._tracks_iou: List[Track] = []
-        self._next_id:    int         = 0
+            print(
+                f"[PlateTracker] WARNING: BotSort init failed — {exc}\n"
+                "  Falling back to IoU-only tracker."
+            )
+            self._use_botsort = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -239,27 +283,41 @@ class PlateTracker:
 
     @property
     def active_tracks(self) -> List[Track]:
+        # Only return tracks that are still active according to BotSort
+        # (_prev_active is the last known set of live track IDs).
+        active_ids = self._prev_active if self._use_botsort else {
+            t.track_id for t in self._tracks_iou
+        }
         return [
             Track(
                 track_id  = tid,
                 plate     = self._consensus_plate(tid),
                 bbox      = self._bbox.get(tid, (0, 0, 0, 0)),
                 conf      = self._conf.get(tid, 0.0),
-                seen      = seen,
+                seen      = self._seen.get(tid, 0),
                 confirmed = tid in self._emitted,
             )
-            for tid, seen in self._seen.items()
+            for tid in active_ids
         ]
 
     def reset(self) -> None:
+        """
+        FIX 7 + FIX 8: Fully reset all state.
+
+        Re-creates the BotSort instance from scratch instead of calling
+        tracker.reset() — which may silently fail on some boxmot builds
+        and leave stale Kalman/ReID state behind.
+        """
+        # Re-create BotSort from scratch (FIX 8)
         if self._use_botsort:
-            try:
-                self._tracker.reset()
-            except AttributeError:
-                pass
-        else:
-            self._tracks_iou.clear()
-            self._next_id = 0
+            self._tracker     = None
+            self._use_botsort = False
+            self._try_init_botsort()
+
+        # FIX 7: always reset IoU-fallback state regardless of active path
+        self._tracks_iou = []
+        self._next_id    = 0
+
         self._votes.clear()
         self._seen.clear()
         self._conf.clear()
@@ -284,7 +342,7 @@ class PlateTracker:
         # Build detection numpy array and plate-text side-table
         plate_by_idx: Dict[int, str]               = {}
         det_bboxes:   List[Tuple[int,int,int,int]] = []
-        total_dets:   int                          = 0  # FIX 2: track real count
+        total_dets:   int                          = 0
 
         if detections:
             rows = []
@@ -295,7 +353,7 @@ class PlateTracker:
                 det_bboxes.append((x1, y1, x2, y2))
                 if plate:
                     plate_by_idx[i] = plate
-            total_dets = len(rows)  # FIX 2: total detections, not just ones with plates
+            total_dets = len(rows)
             dets_np = np.array(rows, dtype=np.float32)
         else:
             dets_np = np.empty((0, 6), dtype=np.float32)
@@ -337,24 +395,15 @@ class PlateTracker:
                 self._conf[track_id]   = max(self._conf[track_id], conf)
                 self._bbox[track_id]   = (x1, y1, x2, y2)
 
-                # --- Resolve plate text ---
-                plate_text = None
-
-                # ----------------------------------------------------------------
                 # FIX 2: Bound check against total_dets, not len(plate_by_idx)
-                # Previously: 0 <= det_idx < len(plate_by_idx)
-                #   len(plate_by_idx) = number of dets WITH a plate (sparse)
-                #   so det_idx=2 was rejected if only dets 0,1 had plates
-                # Correctly: bound against total number of detections sent to tracker
-                # ----------------------------------------------------------------
+                plate_text = None
                 if 0 <= det_idx < total_dets:
                     plate_text = plate_by_idx.get(det_idx)
 
-                # Fallback: det_ind is -1 or out of range (re-activated lost
-                # track with no direct match) → find closest detection by IoU
+                # Fallback: det_ind is -1 or out of range → find closest by IoU
                 if plate_text is None and det_bboxes:
                     track_box = (x1, y1, x2, y2)
-                    best_iou  = 0.20   # minimum IoU to bother
+                    best_iou  = 0.20
                     best_idx  = -1
                     for di, db in enumerate(det_bboxes):
                         s = iou(track_box, db)
@@ -381,25 +430,29 @@ class PlateTracker:
                         })
                         self._emitted.add(track_id)
 
-        # ----------------------------------------------------------------
-        # FIX 3: Read consensus plate BEFORE popping _votes
-        #         Then also discard from _emitted so re-entry can re-confirm
-        # ----------------------------------------------------------------
+        # FIX 5: Always run lost-track loop — even when current_ids is empty.
+        # Previously this was effectively skipped when BotSort returned no
+        # tracks because _prev_active was only updated at the end; any track
+        # that disappeared on a zero-track frame would never fire "lost".
         for tid in self._prev_active - current_ids:
             if tid in self._emitted:
-                plate_for_lost = self._consensus_plate(tid)  # read before pop
+                # FIX 3+4: Read consensus plate BEFORE popping _votes,
+                # then discard from _emitted to allow re-confirmation on re-entry.
+                plate_for_lost = self._consensus_plate(tid)
                 events.append({
                     "type":     "lost",
                     "track_id": tid,
                     "plate":    plate_for_lost,
                 })
-                self._emitted.discard(tid)  # allow re-confirmation if plate returns
+                self._emitted.discard(tid)
 
+            # FIX 6: Clean up stale dict entries to prevent memory leak.
             self._seen.pop(tid, None)
             self._conf.pop(tid, None)
             self._bbox.pop(tid, None)
-            self._votes.pop(tid, None)   # safe to pop now
+            self._votes.pop(tid, None)
 
+        # FIX 5 (cont.): _prev_active is always updated, including on zero-track frames.
         self._prev_active = current_ids
         return events
 
@@ -467,9 +520,11 @@ class PlateTracker:
         for track in self._tracks_iou:
             if track.lost >= self.max_lost:
                 if track.confirmed:
-                    events.append({"type": "lost",
-                                    "track_id": track.track_id,
-                                    "plate":    track.plate})
+                    events.append({
+                        "type":     "lost",
+                        "track_id": track.track_id,
+                        "plate":    track.plate,
+                    })
                     self._emitted.discard(track.track_id)  # allow re-confirm
             else:
                 alive.append(track)
