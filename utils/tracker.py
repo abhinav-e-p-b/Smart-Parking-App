@@ -40,6 +40,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+import inspect
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -122,6 +123,7 @@ class PlateTracker:
     ):
         self.confirm_frames = confirm_frames
         self.vote_thresh    = vote_thresh
+        self.max_lost       = max_lost
 
         self._votes:       Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self._seen:        Dict[int, int]            = defaultdict(int)
@@ -144,22 +146,45 @@ class PlateTracker:
                 from boxmot import BoTSORT as BotSort  # boxmot v10
 
             torch_device = torch.device(device)
-            weights_path = (Path(reid_weights) if reid_weights
-                            else Path("osnet_x0_25_msmt17.pt"))
+            with_reid    = (reid_weights is not None)
 
-            self._tracker = BotSort(
-                reid_weights      = weights_path,
-                device            = torch_device,
-                half              = False,
-                track_high_thresh = track_high_thresh,
-                track_low_thresh  = track_low_thresh,
-                new_track_thresh  = new_track_thresh,
-                track_buffer      = max_lost,
-                match_thresh      = match_thresh,
-                proximity_thresh  = proximity_thresh,
-                appearance_thresh = appearance_thresh,
-                with_reid         = (reid_weights is not None),
-            )
+            # Resolve default ReID path only when ReID is actually requested.
+            # This avoids init failures on versions that validate the path
+            # even when running in Kalman-only mode.
+            if with_reid:
+                if reid_weights:
+                    weights_path = Path(reid_weights)
+                else:
+                    candidates = [
+                        Path("osnet_x0_25_msmt17.pt"),
+                        Path("models/osnet_x0_25_msmt17.pt"),
+                    ]
+                    weights_path = next((p for p in candidates if p.exists()), candidates[0])
+            else:
+                weights_path = None
+
+            init_sig = inspect.signature(BotSort.__init__)
+            init_params = set(init_sig.parameters.keys())
+
+            kwargs = {
+                "device":            torch_device if "device" in init_params else device,
+                "half":              False,
+                "track_high_thresh": track_high_thresh,
+                "track_low_thresh":  track_low_thresh,
+                "new_track_thresh":  new_track_thresh,
+                "track_buffer":      max_lost,
+                "match_thresh":      match_thresh,
+                "proximity_thresh":  proximity_thresh,
+                "appearance_thresh": appearance_thresh,
+                "with_reid":         with_reid,
+            }
+            if "reid_weights" in init_params:
+                kwargs["reid_weights"] = weights_path
+            elif "model_weights" in init_params:
+                kwargs["model_weights"] = weights_path
+
+            kwargs = {k: v for k, v in kwargs.items() if k in init_params}
+            self._tracker = BotSort(**kwargs)
             self._use_botsort = True
             reid_mode = "Kalman + ReID" if reid_weights else "Kalman-only"
             print(f"[PlateTracker] BotSort ready — {reid_mode}  device={device}")
@@ -280,10 +305,20 @@ class PlateTracker:
 
         if tracks is not None and len(tracks) > 0:
             for row in tracks:
-                x1, y1, x2, y2 = int(row[0]), int(row[1]), int(row[2]), int(row[3])
-                track_id = int(row[4])
-                conf     = float(row[5])
-                det_idx  = int(row[7]) if len(row) > 7 else -1
+                if isinstance(row, np.ndarray):
+                    row = row.tolist()
+
+                if isinstance(row, (list, tuple)):
+                    x1, y1, x2, y2 = int(row[0]), int(row[1]), int(row[2]), int(row[3])
+                    track_id = int(row[4])
+                    conf     = float(row[5]) if len(row) > 5 else 0.0
+                    det_idx  = int(row[7]) if len(row) > 7 else -1
+                else:
+                    # Object-style output compatibility.
+                    x1, y1, x2, y2 = map(int, getattr(row, "xyxy", row.tlbr))
+                    track_id = int(getattr(row, "id", getattr(row, "track_id")))
+                    conf     = float(getattr(row, "conf", 0.0))
+                    det_idx  = int(getattr(row, "det_ind", -1))
 
                 current_ids.add(track_id)
                 self._seen[track_id]  += 1
@@ -418,10 +453,10 @@ class PlateTracker:
 
         alive = []
         for track in self._tracks_iou:
-            if track.lost >= 10:
+            if track.lost >= self.max_lost:
                 if track.confirmed:
                     events.append({"type": "lost",
-                                   "track_id": track.track_id,
+                                    "track_id": track.track_id,
                                    "plate": track.plate})
                     self._emitted.discard(track.track_id)  # allow re-confirm
             else:
