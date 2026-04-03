@@ -45,6 +45,11 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+DEFAULT_REID_CANDIDATES = (
+    Path("osnet_x0_25_msmt17.pt"),
+    Path("models/osnet_x0_25_msmt17.pt"),
+)
+
 
 # ---------------------------------------------------------------------------
 # Backward-compat dataclass
@@ -155,10 +160,7 @@ class PlateTracker:
                 if reid_weights:
                     weights_path = Path(reid_weights)
                 else:
-                    candidates = [
-                        Path("osnet_x0_25_msmt17.pt"),
-                        Path("models/osnet_x0_25_msmt17.pt"),
-                    ]
+                    candidates = list(DEFAULT_REID_CANDIDATES)
                     weights_path = next((p for p in candidates if p.exists()), candidates[0])
             else:
                 weights_path = None
@@ -167,7 +169,7 @@ class PlateTracker:
             init_params = set(init_sig.parameters.keys())
 
             kwargs = {
-                "device":            torch_device if "device" in init_params else device,
+                "device":            torch_device,
                 "half":              False,
                 "track_high_thresh": track_high_thresh,
                 "track_low_thresh":  track_low_thresh,
@@ -178,9 +180,9 @@ class PlateTracker:
                 "appearance_thresh": appearance_thresh,
                 "with_reid":         with_reid,
             }
-            if "reid_weights" in init_params:
+            if with_reid and weights_path is not None and "reid_weights" in init_params:
                 kwargs["reid_weights"] = weights_path
-            elif "model_weights" in init_params:
+            elif with_reid and weights_path is not None and "model_weights" in init_params:
                 kwargs["model_weights"] = weights_path
 
             kwargs = {k: v for k, v in kwargs.items() if k in init_params}
@@ -315,8 +317,18 @@ class PlateTracker:
                     det_idx  = int(row[7]) if len(row) > 7 else -1
                 else:
                     # Object-style output compatibility.
-                    x1, y1, x2, y2 = map(int, getattr(row, "xyxy", row.tlbr))
-                    track_id = int(getattr(row, "id", getattr(row, "track_id")))
+                    box = getattr(row, "xyxy", None)
+                    if box is None:
+                        box = getattr(row, "tlbr", None)
+                    if box is None:
+                        continue
+                    x1, y1, x2, y2 = map(int, box)
+                    track_id_raw = getattr(row, "id", None)
+                    if track_id_raw is None:
+                        track_id_raw = getattr(row, "track_id", None)
+                    if track_id_raw is None:
+                        continue
+                    track_id = int(track_id_raw)
                     conf     = float(getattr(row, "conf", 0.0))
                     det_idx  = int(getattr(row, "det_ind", -1))
 
@@ -457,7 +469,7 @@ class PlateTracker:
                 if track.confirmed:
                     events.append({"type": "lost",
                                     "track_id": track.track_id,
-                                   "plate": track.plate})
+                                    "plate":    track.plate})
                     self._emitted.discard(track.track_id)  # allow re-confirm
             else:
                 alive.append(track)
