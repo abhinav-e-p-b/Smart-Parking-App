@@ -1,0 +1,38 @@
+=== Test 1: Kalman-only (reid_weights=None) ===
+SUCCESS  | BotSort: det_thresh=0.3, max_age=30, max_obs=50, min_hits=3, iou_threshold=0.3, per_class=False, asso_func=iou, track_high_thresh=0.25, track_low_thresh=0.05, new_track_thresh=0.25, track_buffer=30, match_thresh=0.85, proximity_thresh=0.35, appearance_thresh=0.3, cmc_method=ecc, frame_rate=30, fuse_first_associate=False, with_reid=False
+SUCCESS  | BotSort: det_thresh=0.3, max_age=30, max_obs=50, min_hits=3, iou_threshold=0.3, per_class=False, asso_func=iou, track_high_thresh=0.25, track_low_thresh=0.05, new_track_thresh=0.25, track_buffer=30, match_thresh=0.85, proximity_thresh=0.35, appearance_thresh=0.3, cmc_method=ecc, frame_rate=30, fuse_first_associate=False, with_reid=True
+INFO     | BoxMOT v16.0.10 \U0001f680 Python-3.10.0 torch-2.10.0+cpuCPU
+INFO     | osnet_x0_25_msmt17.pt
+INFO     | [PID 29164] Found existing ReID weights at osnet_x0_25_msmt17.pt; skipping download.
+SUCCESS  | Loaded pretrained weights from osnet_x0_25_msmt17.pt
+SUCCESS  | BotSort: det_thresh=0.3, max_age=30, max_obs=50, min_hits=3, iou_threshold=0.3, per_class=False, asso_func=iou, track_high_thresh=0.25, track_low_thresh=0.05, new_track_thresh=0.25, track_buffer=30, match_thresh=0.85, proximity_thresh=0.35, appearance_thresh=0.3, cmc_method=ecc, frame_rate=30, fuse_first_associate=False, with_reid=False
+[PlateTracker] BotSort ready ΓÇö Kalman-only  device=cpu
+[PlateTracker] thresholds: high=0.25  new=0.25  confirm=2frames
+Using botsort: True
+  Frame 1: seen={1: 1}  events=[]
+  Frame 2: seen={1: 2}  events=[{'type': 'confirmed', 'track_id': 1, 'plate': 'MH12AB3456', 'conf': 0.8999999761581421, 'bbox': (100, 100, 300, 200)}]
+  Frame 3: seen={1: 3}  events=[]
+  Frame 4: seen={1: 4}  events=[]
+  Frame 5: seen={1: 5}  events=[]
+  >> Confirmed events: [{'type': 'confirmed', 'track_id': 1, 'plate': 'MH12AB3456', 'conf': 0.8999999761581421, 'bbox': (100, 100, 300, 200)}]
+
+=== Test 2: With ReID weights (osnet_x0_25_msmt17.pt) ===
+[PlateTracker] BotSort ready ΓÇö Kalman + ReID  device=cpu
+[PlateTracker] thresholds: high=0.25  new=0.25  confirm=2frames
+Using botsort: True
+  Frame 1: seen={1: 1}  events=[]
+  Frame 2: seen={1: 2}  events=[{'type': 'confirmed', 'track_id': 1, 'plate': 'MH12AB3456', 'conf': 0.8999999761581421, 'bbox': (99, 99, 299, 199)}]
+  Frame 3: seen={1: 3}  events=[]
+  Frame 4: seen={1: 4}  events=[]
+  Frame 5: seen={1: 5}  events=[]
+  >> Confirmed events: [{'type': 'confirmed', 'track_id': 1, 'plate': 'MH12AB3456', 'conf': 0.8999999761581421, 'bbox': (99, 99, 299, 199)}]
+
+=== Test 3: Two separate plates, confirm_frames=2 ===
+[PlateTracker] BotSort ready ΓÇö Kalman-only  device=cpu
+[PlateTracker] thresholds: high=0.25  new=0.25  confirm=2frames
+  Frame 1: events=[]
+  Frame 2: events=[{'type': 'confirmed', 'track_id': 1, 'plate': 'KL07BB1234', 'conf': 0.8999999761581421, 'bbox': (0, 0, 100, 50)}, {'type': 'confirmed', 'track_id': 2, 'plate': 'MH12AB3456', 'conf': 0.8999999761581421, 'bbox': (400, 0, 500, 50)}]
+  Frame 3: events=[]
+  >> Confirmed events: [{'type': 'confirmed', 'track_id': 1, 'plate': 'KL07BB1234', 'conf': 0.8999999761581421, 'bbox': (0, 0, 100, 50)}, {'type': 'confirmed', 'track_id': 2, 'plate': 'MH12AB3456', 'conf': 0.8999999761581421, 'bbox': (400, 0, 500, 50)}]
+
+=== ALL DONE ===

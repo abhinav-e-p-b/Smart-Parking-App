@@ -4,6 +4,11 @@ detect_webcam.py — Real-time ANPR from webcam or IP camera.
 Thresholds imported from utils/constants.py — shared with detect_video.py
 so behaviour is consistent across modes.
 
+FIX applied in this version
+-----------------------------
+- PlateTracker constructor was passing hardcoded vote_thresh=0.40 instead
+  of the VOTE_THRESH constant from utils/constants.py.
+
 Usage
 -----
   python detect_webcam.py                           # default webcam
@@ -34,7 +39,7 @@ from utils.visualise import draw_detections, add_fps_overlay
 from utils.constants import (
     CONF_THRESH, IOU_THRESH, OCR_MIN_CONF,
     WEBCAM_NTH_FRAME, WEBCAM_MOTION_THRESH,
-    CONFIRM_FRAMES, MAX_LOST,
+    CONFIRM_FRAMES, MAX_LOST, VOTE_THRESH,
 )
 
 DEFAULT_MODEL = "models/best.pt"
@@ -58,11 +63,12 @@ def run_webcam(
     detector = YOLO(model_path)
     reader   = PlateReader(gpu=False)
 
+    # FIX: Use VOTE_THRESH constant — previously hardcoded 0.40
     tracker = PlateTracker(
         reid_weights      = reid_weights,
         confirm_frames    = CONFIRM_FRAMES,
         max_lost          = MAX_LOST,
-        vote_thresh       = 0.40,
+        vote_thresh       = VOTE_THRESH,       # FIX: was hardcoded 0.40
         device            = "cpu",
         track_high_thresh = conf,
         track_low_thresh  = 0.05,
@@ -80,7 +86,8 @@ def run_webcam(
 
     print(f"Webcam ANPR ready. Source={source}  "
           f"ReID={'on' if reid_weights else 'off'}")
-    print(f"OCR min conf: {OCR_MIN_CONF}  Detection conf: {conf}")
+    print(f"OCR min conf: {OCR_MIN_CONF}  Detection conf: {conf}  "
+          f"Vote thresh: {VOTE_THRESH}")
     print("Controls: q=quit  s=save frame  r=reset")
 
     while True:

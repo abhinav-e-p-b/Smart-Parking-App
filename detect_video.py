@@ -14,6 +14,12 @@ PlateTracker (BotSort, boxmot) assigns each physical plate one stable
 track ID via Kalman filter + optional ReID.  A "confirmed" event fires
 EXACTLY ONCE per track ID → same plate never written to CSV twice.
 
+FIX applied in this version
+-----------------------------
+- PlateTracker constructor was passing hardcoded vote_thresh=0.40 instead
+  of the VOTE_THRESH constant imported from utils/constants.py. This meant
+  that changing VOTE_THRESH in constants.py had no effect on video mode.
+
 Usage
 -----
   python detect_video.py --source video.mp4
@@ -37,7 +43,7 @@ from utils.tracker import PlateTracker
 from utils.visualise import draw_detections, add_fps_overlay
 from utils.constants import (
     CONF_THRESH, IOU_THRESH, OCR_MIN_CONF,
-    NTH_FRAME, MOTION_THRESH, CONFIRM_FRAMES, MAX_LOST,
+    NTH_FRAME, MOTION_THRESH, CONFIRM_FRAMES, MAX_LOST, VOTE_THRESH,
 )
 
 DEFAULT_MODEL = "models/best.pt"
@@ -77,7 +83,8 @@ def process_video(
     print(f"Video      : {source}")
     print(f"Resolution : {width}×{height}  |  FPS: {fps_in:.1f}  |  Frames: {total_frames}")
     print(f"Settings   : conf={conf}  nth={nth}  motion_thresh={motion_thresh}  "
-          f"confirm={CONFIRM_FRAMES}frames  ocr_min_conf={OCR_MIN_CONF}")
+          f"confirm={CONFIRM_FRAMES}frames  ocr_min_conf={OCR_MIN_CONF}  "
+          f"vote_thresh={VOTE_THRESH}")
 
     # ------------------------------------------------------------------
     # Video writer
@@ -96,12 +103,13 @@ def process_video(
 
     # ------------------------------------------------------------------
     # BoT-SORT tracker
+    # FIX: Use VOTE_THRESH constant — previously hardcoded 0.40
     # ------------------------------------------------------------------
     tracker = PlateTracker(
         reid_weights      = reid_weights,
         confirm_frames    = CONFIRM_FRAMES,
         max_lost          = MAX_LOST,
-        vote_thresh       = 0.40,
+        vote_thresh       = VOTE_THRESH,       # FIX: was hardcoded 0.40
         device            = "cpu",
         track_high_thresh = conf,
         track_low_thresh  = 0.05,

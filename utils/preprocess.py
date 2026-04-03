@@ -5,19 +5,19 @@ preprocess_plate(crop) returns a dict of named image variants.
 Each caller iterates the dict, runs OCR on each variant, and picks
 the first one that produces a valid plate reading.
 
-Key additions vs previous version
------------------------------------
-1. deskew()  — corrects skew angle using minAreaRect on the text mask.
-               This fixes the "EasyOCR reads single characters" problem
-               that occurs when plates appear at an angle in portrait
-               video (phone/parking camera footage).
-
-2. try_rotations() — when the standard pipeline fails, the crop is also
-               tried at 90°/180°/270° rotations. This handles cameras
-               mounted sideways or upside-down.
-
-3. All rotation variants are included in the returned dict so the OCR
-   caller automatically tries them without any changes to ocr.py.
+FIX applied in this version
+-----------------------------
+- deskew() angle conversion bug: the original `if angle < -45: angle = 90 + angle`
+  branch mapped OpenCV's (-90, 0] convention incorrectly near the boundary.
+  OpenCV's minAreaRect returns the angle of the SHORTER side from horizontal,
+  in the range (-90, 0]. The correct conversion to a signed skew angle is:
+    • if angle < -45  → the rect is "standing up": true_angle = angle + 90
+    • if angle >= -45 → the rect is "lying down":  true_angle = angle
+  The old code did exactly this but the comment was misleading. The REAL bug
+  was that `abs(angle) > max_angle` was checked AFTER conversion, but
+  max_angle=45 was too generous — a plate legitimately rotated 44° was being
+  "deskewed" in the wrong direction. Fix: clamp corrected angle to ±15° for
+  realistic in-video skew, and use the proper two-step OpenCV convention.
 
 Variants (ordered best-first):
   'gray'           — CLAHE-enhanced grayscale
@@ -33,6 +33,8 @@ Variants (ordered best-first):
   'rot270_gray'    — 270° rotated
   'rot90_deskewed' — 90° rotated then deskewed
   'rot270_deskewed'— 270° rotated then deskewed
+  'rot90_otsu'     — 90° rotated + Otsu (last resort)
+  'rot270_otsu'    — 270° rotated + Otsu (last resort)
 """
 
 import cv2
@@ -100,30 +102,31 @@ def morph_clean(binary: np.ndarray, k: int = 2) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# NEW: Deskew
+# Deskew
 # ---------------------------------------------------------------------------
 
-def deskew(gray: np.ndarray, max_angle: float = 45.0) -> np.ndarray:
+def deskew(gray: np.ndarray, max_skew: float = 15.0) -> np.ndarray:
     """
-    Correct skew in a grayscale plate crop.
+    Correct small skew in a grayscale plate crop.
 
-    Detects the dominant text angle using minAreaRect on thresholded
-    contours and rotates the image to horizontal.  Only corrects angles
-    within ±max_angle degrees — larger angles are likely a rotation
-    issue (handled by try_rotations) rather than skew.
+    OpenCV's minAreaRect returns an angle in (-90, 0]:
+      - angle in [-45, 0)  → rect lies horizontally; skew = angle  (negative = CCW tilt)
+      - angle in (-90, -45) → rect stands vertically; skew = angle + 90  (positive = CW tilt)
 
-    Returns the deskewed image (same size, black fill on borders).
+    We only correct skew within ±max_skew degrees.  Larger deviations are
+    likely a 90°/180°/270° camera rotation, handled by try_rotations().
+
+    FIX: Previous code used max_angle=45 which was too permissive and could
+    apply a large unwanted rotation. Clamped to 15° for realistic plate skew.
     """
     # Threshold to get a binary mask of dark regions (text)
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # Find contours of text blobs
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     if not contours:
         return gray
 
-    # Keep only reasonably sized contours (not tiny noise, not the whole image)
     h, w = gray.shape
     min_area = (h * w) * 0.001   # at least 0.1% of image
     max_area = (h * w) * 0.80    # at most 80% of image
@@ -133,26 +136,28 @@ def deskew(gray: np.ndarray, max_angle: float = 45.0) -> np.ndarray:
     if not valid:
         return gray
 
-    # Combine all valid contours and fit a rotated bounding rect
     all_pts = np.vstack(valid)
     rect    = cv2.minAreaRect(all_pts)
     angle   = rect[2]   # OpenCV returns angle in (-90, 0]
 
-    # Convert to a signed angle: positive = clockwise, negative = counter-clockwise
-    if angle < -45:
-        angle = 90 + angle   # e.g. -80 → +10
-    # angle is now in range (-45, +45)
+    # Convert OpenCV angle convention to signed skew angle
+    # (-90, -45): rect is "vertical" → true skew = angle + 90  (small positive)
+    # [-45,  0):  rect is "horizontal" → true skew = angle      (small negative)
+    if angle < -45.0:
+        skew_angle = angle + 90.0
+    else:
+        skew_angle = angle
+    # skew_angle is now in roughly (-45, +45); realistic plate skew is < 15°
 
-    if abs(angle) < 1.0 or abs(angle) > max_angle:
-        return gray   # nothing to correct
+    if abs(skew_angle) < 0.5 or abs(skew_angle) > max_skew:
+        return gray   # nothing to correct, or too large (rotation, not skew)
 
-    # Rotate around centre
-    centre = (w / 2, h / 2)
-    M      = cv2.getRotationMatrix2D(centre, angle, 1.0)
+    centre = (w / 2.0, h / 2.0)
+    M      = cv2.getRotationMatrix2D(centre, skew_angle, 1.0)
     rotated = cv2.warpAffine(
         gray, M, (w, h),
-        flags       = cv2.INTER_CUBIC,
-        borderMode  = cv2.BORDER_REPLICATE,
+        flags      = cv2.INTER_CUBIC,
+        borderMode = cv2.BORDER_REPLICATE,
     )
     return rotated
 
@@ -206,21 +211,21 @@ def preprocess_plate(crop: np.ndarray) -> dict:
 
     return {
         # --- Standard orientation, best preprocessing first ---
-        "gray":           gray_enhanced,
-        "deskewed":       gray_deskewed,
-        "sharp":          sharp,
-        "boosted":        boosted,
-        "otsu":           otsu_threshold(sharp),
-        "otsu_inv":       otsu_threshold_inv(sharp),
-        "adap":           adaptive_threshold(sharp, 31, 5),
-        "adap_inv":       adaptive_threshold_inv(sharp, 31, 5),
+        "gray":            gray_enhanced,
+        "deskewed":        gray_deskewed,
+        "sharp":           sharp,
+        "boosted":         boosted,
+        "otsu":            otsu_threshold(sharp),
+        "otsu_inv":        otsu_threshold_inv(sharp),
+        "adap":            adaptive_threshold(sharp, 31, 5),
+        "adap_inv":        adaptive_threshold_inv(sharp, 31, 5),
         # --- Rotated variants (handles portrait/sideways cameras) ---
-        "rot90_gray":     rot90,
-        "rot90_deskewed": rot90_deskewed,
-        "rot180_gray":    rot180,
-        "rot270_gray":    rot270,
-        "rot270_deskewed":rot270_deskewed,
+        "rot90_gray":      rot90,
+        "rot90_deskewed":  rot90_deskewed,
+        "rot180_gray":     rot180,
+        "rot270_gray":     rot270,
+        "rot270_deskewed": rot270_deskewed,
         # --- Rotated + binarised (last resort) ---
-        "rot90_otsu":     otsu_threshold(rot90),
-        "rot270_otsu":    otsu_threshold(rot270),
+        "rot90_otsu":      otsu_threshold(rot90),
+        "rot270_otsu":     otsu_threshold(rot270),
     }

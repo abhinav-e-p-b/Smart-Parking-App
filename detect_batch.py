@@ -11,6 +11,14 @@ each image is independent.  Deduplication here means:
      same plate string from appearing more than once in the CSV output.
      Toggle with --allow-duplicates if you need the raw repeat counts.
 
+FIX applied in this version
+-----------------------------
+- Thread-safety bug: when workers > 1 the original code shared a single
+  YOLO detector and PlateReader across all threads. PyTorch models are NOT
+  thread-safe — concurrent forward passes on the same model instance cause
+  silent result corruption or crashes.  Fix: each worker thread creates its
+  own detector + reader instances via threading.local().
+
 Usage
 -----
   python detect_batch.py --source data/raw/
@@ -21,6 +29,7 @@ Usage
 
 import argparse
 import csv
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -39,11 +48,23 @@ from utils.constants import CONF_THRESH, IOU_THRESH, OCR_MIN_CONF
 DEFAULT_MODEL = "models/best.pt"
 IMG_EXTS      = {".jpg", ".jpeg", ".png", ".bmp"}
 
+# FIX: Thread-local storage so each worker thread has its own model instances.
+# PyTorch models share internal state (buffers, batch-norm running stats) and
+# are NOT thread-safe for concurrent inference on the same instance.
+_thread_local = threading.local()
+
+
+def _get_thread_models(model_path: str):
+    """Return (detector, reader) for the current thread, creating if needed."""
+    if not hasattr(_thread_local, "detector"):
+        _thread_local.detector = YOLO(model_path)
+        _thread_local.reader   = PlateReader(gpu=False)
+    return _thread_local.detector, _thread_local.reader
+
 
 def process_single(
     img_path:   Path,
-    detector:   YOLO,
-    reader:     PlateReader,
+    model_path: str,
     conf:       float,
     iou:        float,
     output_dir: Path = None,
@@ -63,6 +84,9 @@ def process_single(
             "error": "unreadable_file",
         }
 
+    # FIX: Get per-thread model instances (safe for concurrent use)
+    detector, reader = _get_thread_models(model_path)
+
     results = detector(img, conf=conf, iou=iou, verbose=False)
     boxes   = results[0].boxes
 
@@ -80,7 +104,6 @@ def process_single(
             continue
 
         processed  = preprocess_plate(crop)
-        # OCR_MIN_CONF now imported from constants — same value as video/webcam
         plate_text = reader.read(processed, min_conf=OCR_MIN_CONF)
 
         det_list.append((x1, y1, x2, y2, det_conf))
@@ -149,25 +172,27 @@ def run_batch(
     print(f"  Workers     : {workers}")
     print(f"  Dedup       : {'off (allow-duplicates)' if allow_duplicates else 'on (unique plates only)'}")
 
-    detector   = YOLO(model_path)
-    reader     = PlateReader(gpu=False)
     output_dir = Path(output) if output else None
 
-    seen_plates: set = set()
+    # Thread-safe dedup via a lock
+    seen_plates: set          = set()
+    seen_lock:   threading.Lock = threading.Lock()
 
     t0          = time.perf_counter()
     all_results = []
 
     def _process_and_dedup(img_path: Path) -> dict:
-        result = process_single(img_path, detector, reader, conf, iou_thresh, output_dir)
+        # FIX: pass model_path into process_single so thread can create its own instance
+        result = process_single(img_path, model_path, conf, iou_thresh, output_dir)
         plate  = result.get("plate")
         if plate and not allow_duplicates:
-            if plate in seen_plates:
-                result["plate"]     = None
-                result["det_conf"]  = None
-                result["note"]      = f"duplicate_of_earlier_{plate}"
-            else:
-                seen_plates.add(plate)
+            with seen_lock:
+                if plate in seen_plates:
+                    result["plate"]     = None
+                    result["det_conf"]  = None
+                    result["note"]      = f"duplicate_of_earlier_{plate}"
+                else:
+                    seen_plates.add(plate)
         return result
 
     if workers > 1:

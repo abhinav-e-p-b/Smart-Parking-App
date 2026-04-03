@@ -26,6 +26,8 @@ VALID_STATES = {
 }
 STANDARD_PATTERN = re.compile(r"^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{4}$")
 BH_PATTERN       = re.compile(r"^[0-9]{2}BH[0-9]{4}[A-Z]{1,2}$")
+_PLATE_RE        = re.compile(r"[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{4}")
+_BH_RE           = re.compile(r"[0-9]{2}BH[0-9]{4}[A-Z]{1,2}")
 LETTER_POS       = {0, 1, 4, 5}
 DIGIT_POS        = {2, 3, 6, 7, 8, 9}
 LETTER_FIXES     = {"0": "O", "1": "I", "l": "I", "8": "B", "5": "S"}
@@ -43,7 +45,9 @@ def fix_characters(raw):
 
 
 def normalise_raw(raw):
-    return raw.upper().replace(" ", "").replace("-", "").replace(".", "")
+    return (raw.upper()
+               .replace(" ", "").replace("-", "")
+               .replace(".", "").replace(":", "").replace(",", ""))
 
 
 def validate_plate(plate):
@@ -58,14 +62,33 @@ def validate_plate(plate):
     return None, f"does not match SS DD LL DDDD pattern (got '{plate}')"
 
 
+def extract_plate_from_noise(noisy):
+    """Sliding window plate extractor — finds plate buried in noisy string."""
+    for pattern in (_BH_RE, _PLATE_RE):
+        m = pattern.search(noisy)
+        if m:
+            candidate = fix_characters(m.group())
+            result, _ = validate_plate(candidate)
+            if result:
+                return result, f"regex match at pos {m.start()}"
+    for length in (10, 9, 8):
+        for start in range(len(noisy) - length + 1):
+            window = noisy[start : start + length]
+            fixed  = fix_characters(window)
+            result, _ = validate_plate(fixed)
+            if result:
+                return result, f"window[{start}:{start+length}] '{window}'→'{fixed}'"
+    return None, "no plate found in any window"
+
+
 def get_variants(crop):
     try:
         from utils.preprocess import preprocess_plate
         return preprocess_plate(crop)
     except ImportError:
-        up   = cv2.resize(crop, (crop.shape[1]*2, crop.shape[0]*2),
-                          interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY) if len(up.shape)==3 else up
+        up    = cv2.resize(crop, (crop.shape[1]*2, crop.shape[0]*2),
+                           interpolation=cv2.INTER_CUBIC)
+        gray  = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY) if len(up.shape)==3 else up
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         return {"gray": clahe.apply(gray)}
 
@@ -76,22 +99,40 @@ def save_variant_grid(variants: dict, out_path: Path):
     for name, img in variants.items():
         h, w = img.shape[:2]
         scale = target_h / h
-        resized = cv2.resize(img, (max(1, int(w*scale)), target_h))
+        resized = cv2.resize(img, (max(1, int(w * scale)), target_h))
         if len(resized.shape) == 2:
             resized = cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
         cv2.putText(resized, name, (2, 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
         cells.append(resized)
+
     if not cells:
         return
+
     cols = 4
     rows_imgs = []
-    for i in range(0, len(cells), cols):
-        row = cells[i:i+cols]
+    for row_start in range(0, len(cells), cols):
+        row = cells[row_start : row_start + cols]
         while len(row) < cols:
             row.append(np.zeros_like(cells[0]))
-        rows_imgs.append(np.hstack(row))
-    cv2.imwrite(str(out_path), np.vstack(rows_imgs))
+        max_w = max(c.shape[1] for c in row)
+        padded = []
+        for c in row:
+            if c.shape[1] < max_w:
+                pad = np.zeros((c.shape[0], max_w - c.shape[1], 3), dtype=c.dtype)
+                c = np.hstack([c, pad])
+            padded.append(c)
+        rows_imgs.append(np.hstack(padded))
+
+    max_row_w = max(r.shape[1] for r in rows_imgs)
+    final_rows = []
+    for r in rows_imgs:
+        if r.shape[1] < max_row_w:
+            pad = np.zeros((r.shape[0], max_row_w - r.shape[1], 3), dtype=r.dtype)
+            r = np.hstack([r, pad])
+        final_rows.append(r)
+
+    cv2.imwrite(str(out_path), np.vstack(final_rows))
 
 
 def debug_crop(crop_img, reader, crop_label="crop", save_dir=None):
@@ -116,22 +157,50 @@ def debug_crop(crop_img, reader, crop_label="crop", save_dir=None):
 
         for _, text, conf in results:
             flag = " ← LOW CONF" if conf < 0.15 else ""
-            print(f"  [{vname:18s}]  raw='{text}'  conf={conf:.3f}{flag}")
+            print(f"  [{vname:18s}]  box='{text}'  conf={conf:.3f}{flag}")
 
-        merged     = "".join(t for _, t, _ in
-                              sorted(results, key=lambda r: r[0][0][1]))
-        normalised = normalise_raw(merged)
-        fixed      = fix_characters(normalised)
-        result, reason = validate_plate(fixed)
+        # --- Strategy 1: per-box ---
+        for _, text, conf in results:
+            norm = normalise_raw(text)
+            if len(norm) < 6:
+                continue
+            fixed = fix_characters(norm)
+            plate, reason = validate_plate(fixed)
+            if plate:
+                print(f"  [{vname:18s}]  ✓ per-box direct: '{text}' → {plate}")
+                print(f"\n  ✓ Found in variant '{vname}': {plate}")
+                return plate
+            plate, _ = extract_plate_from_noise(norm)
+            if plate:
+                print(f"  [{vname:18s}]  ✓ per-box extracted: '{text}' → {plate}")
+                print(f"\n  ✓ Found in variant '{vname}': {plate}")
+                return plate
 
-        print(f"  {'':18s}   → merged='{merged}'  normalised='{normalised}'"
-              f"  fixed='{fixed}'")
-        if result:
-            print(f"  {'':18s}   ✓ VALID: {result}")
-            print(f"\n  ✓ Found in variant '{vname}': {result}")
-            return result
+        # --- Strategy 2 & 3: merged ---
+        merged = "".join(t for _, t, _ in
+                         sorted(results, key=lambda r: min(pt[1] for pt in r[0])))
+        norm   = normalise_raw(merged)
+        fixed  = fix_characters(norm)
+        plate, reason = validate_plate(fixed)
+
+        print(f"  {'':18s}   merged='{merged}'  norm='{norm}'  fixed='{fixed}'")
+
+        if plate:
+            print(f"  {'':18s}   ✓ VALID (direct): {plate}")
+            print(f"\n  ✓ Found in variant '{vname}': {plate}")
+            return plate
         else:
-            print(f"  {'':18s}   ✗ {reason}")
+            print(f"  {'':18s}   ✗ direct: {reason}")
+
+        # Noise extraction
+        if len(norm) >= 8:
+            plate, how = extract_plate_from_noise(norm)
+            if plate:
+                print(f"  {'':18s}   ✓ VALID (noise extract): {plate}  [{how}]")
+                print(f"\n  ✓ Found in variant '{vname}': {plate}")
+                return plate
+            else:
+                print(f"  {'':18s}   ✗ noise extract: {how}")
 
     print(f"\n  ✗ No valid plate found for {crop_label}")
     return None
@@ -204,17 +273,11 @@ def debug_from_video(source, max_crops=10, save_crops_dir=None):
     print(f"Total crops  : {len(crops)}")
     print(f"Valid plates : {valid_count}")
     if valid_count == 0:
-        print()
-        print("All crops failed. Open outputs/crops/*_variants.jpg and look for")
-        print("the variant where the plate text reads left-to-right horizontally.")
-        print()
-        print("If rot90_gray / rot270_gray shows readable text:")
-        print("  → Camera is mounted sideways. The new preprocess.py handles this.")
-        print("  → Make sure you replaced utils/preprocess.py with the new version.")
-        print()
-        print("If ALL variants show only 1-3 chars (individual characters):")
-        print("  → YOLO is cropping PART of the plate, not the full plate.")
-        print("  → Check *_original.jpg — is the full plate number visible in the crop?")
+        print("\nAll crops failed. Check _original.jpg files:")
+        print("  → If the plate is visible but sideways, rot90 variants should work")
+        print("    now with noise extraction. Try lowering --max-crops and checking")
+        print("    if OCR reads the plate text at all in any variant.")
+        print("  → If the crop only shows 1-3 chars, YOLO is cropping part of plate.")
     print(f"{'='*60}")
 
 
