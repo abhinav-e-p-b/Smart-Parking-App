@@ -1,5 +1,5 @@
 """
-debug_ocr.py — Show exactly what EasyOCR reads before and after validation.
+debug_ocr.py — Show exactly what PaddleOCR reads before and after validation.
 
 Usage
 -----
@@ -14,7 +14,6 @@ import sys
 from pathlib import Path
 
 import cv2
-import easyocr
 import numpy as np
 
 VALID_STATES = {
@@ -63,7 +62,6 @@ def validate_plate(plate):
 
 
 def extract_plate_from_noise(noisy):
-    """Sliding window plate extractor — finds plate buried in noisy string."""
     for pattern in (_BH_RE, _PLATE_RE):
         m = pattern.search(noisy)
         if m:
@@ -105,10 +103,8 @@ def save_variant_grid(variants: dict, out_path: Path):
         cv2.putText(resized, name, (2, 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
         cells.append(resized)
-
     if not cells:
         return
-
     cols = 4
     rows_imgs = []
     for row_start in range(0, len(cells), cols):
@@ -123,7 +119,6 @@ def save_variant_grid(variants: dict, out_path: Path):
                 c = np.hstack([c, pad])
             padded.append(c)
         rows_imgs.append(np.hstack(padded))
-
     max_row_w = max(r.shape[1] for r in rows_imgs)
     final_rows = []
     for r in rows_imgs:
@@ -131,9 +126,124 @@ def save_variant_grid(variants: dict, out_path: Path):
             pad = np.zeros((r.shape[0], max_row_w - r.shape[1], 3), dtype=r.dtype)
             r = np.hstack([r, pad])
         final_rows.append(r)
-
     cv2.imwrite(str(out_path), np.vstack(final_rows))
 
+
+# ---------------------------------------------------------------------------
+# PaddleOCR helpers (shared with utils/ocr.py logic)
+# ---------------------------------------------------------------------------
+
+def _ensure_bgr(img: np.ndarray) -> np.ndarray:
+    if len(img.shape) == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return img
+
+
+def _parse_paddle_results(raw) -> list:
+    """Normalise PaddleOCR output → list of (box, text, conf)."""
+    if raw is None:
+        return []
+    parsed = []
+    for page in raw:
+        if page is None:
+            continue
+        for entry in page:
+            try:
+                if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                    box      = entry[0]
+                    text_obj = entry[1]
+                    if isinstance(text_obj, (list, tuple)) and len(text_obj) == 2:
+                        text = str(text_obj[0])
+                        conf = float(text_obj[1])
+                    elif hasattr(text_obj, "text"):
+                        text = str(text_obj.text)
+                        conf = float(getattr(text_obj, "score", 1.0))
+                    else:
+                        continue
+                    parsed.append((box, text, conf))
+                elif isinstance(entry, dict):
+                    box  = entry.get("bbox") or entry.get("box")
+                    text = str(entry.get("text", ""))
+                    conf = float(entry.get("score", entry.get("conf", 1.0)))
+                    if box is not None and text:
+                        parsed.append((box, text, conf))
+            except Exception:
+                continue
+    return parsed
+
+
+def _run_ocr(reader, img: np.ndarray) -> list:
+    """Run PaddleOCR on one image; return parsed (box, text, conf) list."""
+    img_bgr = _ensure_bgr(img)
+    try:
+        raw = reader.ocr(img_bgr, cls=True)
+    except TypeError:
+        raw = reader.ocr(img_bgr)
+    return _parse_paddle_results(raw)
+
+
+def _make_reader(gpu: bool = False):
+    """
+    Build a PaddleOCR reader compatible with v2 and v3.
+
+    Detection order:
+    1. paddleocr.__version__ major number (most reliable).
+    2. Full MRO parameter scan — v3 uses deep inheritance so 'use_gpu'
+       may not appear in __init__ directly.
+    3. Runtime try/except fallback so a wrong static detection never crashes.
+    """
+    import os, inspect
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+
+    import paddleocr
+    from paddleocr import PaddleOCR
+
+    # --- Step 1: version string ---
+    api_ver = 2
+    try:
+        ver_str = getattr(paddleocr, "__version__", "") or ""
+        major = int(ver_str.split(".")[0]) if ver_str and ver_str[0].isdigit() else 0
+        if major >= 3:
+            api_ver = 3
+    except Exception:
+        pass
+
+    # --- Step 2: MRO scan fallback ---
+    if api_ver == 2:
+        try:
+            all_params: set = set()
+            for cls in type.mro(PaddleOCR):
+                try:
+                    all_params.update(inspect.signature(cls.__init__).parameters.keys())
+                except (ValueError, TypeError):
+                    continue
+            if "use_gpu" not in all_params:
+                api_ver = 3
+        except Exception:
+            pass
+
+    def _try_v3():
+        return PaddleOCR(device="gpu" if gpu else "cpu")
+
+    def _try_v2():
+        return PaddleOCR(use_angle_cls=True, lang="en", use_gpu=gpu, show_log=False)
+
+    # --- Step 3: construct with runtime fallback ---
+    if api_ver >= 3:
+        try:
+            return _try_v3()
+        except (TypeError, ValueError):
+            return _try_v2()
+    else:
+        try:
+            return _try_v2()
+        except (TypeError, ValueError):
+            return _try_v3()
+
+
+# ---------------------------------------------------------------------------
+# Main debug routine
+# ---------------------------------------------------------------------------
 
 def debug_crop(crop_img, reader, crop_label="crop", save_dir=None):
     h, w = crop_img.shape[:2]
@@ -149,10 +259,10 @@ def debug_crop(crop_img, reader, crop_label="crop", save_dir=None):
         print(f"  Saved → {save_dir}/{crop_label}_variants.jpg")
 
     for vname, vimg in variants.items():
-        results = reader.readtext(vimg, detail=1, paragraph=False)
+        results = _run_ocr(reader, vimg)
 
         if not results:
-            print(f"  [{vname:18s}]  EasyOCR returned NOTHING")
+            print(f"  [{vname:18s}]  PaddleOCR returned NOTHING")
             continue
 
         for _, text, conf in results:
@@ -177,10 +287,16 @@ def debug_crop(crop_img, reader, crop_label="crop", save_dir=None):
                 return plate
 
         # --- Strategy 2 & 3: merged ---
-        merged = "".join(t for _, t, _ in
-                         sorted(results, key=lambda r: min(pt[1] for pt in r[0])))
-        norm   = normalise_raw(merged)
-        fixed  = fix_characters(norm)
+        try:
+            merged = "".join(
+                t for _, t, _ in
+                sorted(results, key=lambda r: min(pt[1] for pt in r[0]))
+            )
+        except (TypeError, IndexError):
+            merged = "".join(t for _, t, _ in results)
+
+        norm  = normalise_raw(merged)
+        fixed = fix_characters(norm)
         plate, reason = validate_plate(fixed)
 
         print(f"  {'':18s}   merged='{merged}'  norm='{norm}'  fixed='{fixed}'")
@@ -192,7 +308,6 @@ def debug_crop(crop_img, reader, crop_label="crop", save_dir=None):
         else:
             print(f"  {'':18s}   ✗ direct: {reason}")
 
-        # Noise extraction
         if len(norm) >= 8:
             plate, how = extract_plate_from_noise(norm)
             if plate:
@@ -229,8 +344,9 @@ def debug_from_video(source, max_crops=10, save_crops_dir=None):
         save_dir.mkdir(parents=True, exist_ok=True)
         print(f"Saving to: {save_dir}\n")
 
-    detector  = YOLO("models/best.pt")
-    reader    = easyocr.Reader(["en"], gpu=False)
+    detector = YOLO("models/best.pt")
+    reader   = _make_reader(gpu=False)
+
     crops     = []
     frame_id  = 0
     prev_gray = None
@@ -275,8 +391,6 @@ def debug_from_video(source, max_crops=10, save_crops_dir=None):
     if valid_count == 0:
         print("\nAll crops failed. Check _original.jpg files:")
         print("  → If the plate is visible but sideways, rot90 variants should work")
-        print("    now with noise extraction. Try lowering --max-crops and checking")
-        print("    if OCR reads the plate text at all in any variant.")
         print("  → If the crop only shows 1-3 chars, YOLO is cropping part of plate.")
     print(f"{'='*60}")
 
@@ -299,5 +413,5 @@ if __name__ == "__main__":
         if args.save_crops:
             save_dir = Path(args.save_crops)
             save_dir.mkdir(parents=True, exist_ok=True)
-        reader = easyocr.Reader(["en"], gpu=False)
+        reader = _make_reader(gpu=False)
         debug_crop(img, reader, Path(args.source).name, save_dir)
