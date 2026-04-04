@@ -140,8 +140,8 @@ indian-anpr/
 ### 1. Clone and create environment
 
 ```bash
-git clone https://github.com/yourname/indian-anpr.git
-cd indian-anpr
+git clone https://github.com/abhinav-e-p-b/Smart-Parking-App.git
+cd Smart-Parking-App
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 ```
