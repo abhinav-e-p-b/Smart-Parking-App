@@ -1,19 +1,34 @@
-# Core detection
+# Core detection & OCR
 ultralytics>=8.0.0
 easyocr>=1.7.0
+paddlepaddle>=2.6.0
+paddleocr>=2.7.0
 opencv-python>=4.8.0
+Pillow>=9.5.0
 
 # Scientific computing
 numpy>=1.24.0
 scipy>=1.10.0
 
-# PyTorch (CPU builds - swap for CUDA builds on GPU systems)
-# For CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# Deep learning (CPU default — switch to GPU if needed)
 torch>=2.0.0
 torchvision>=0.15.0
 
-# Database / data
-pandas>=2.0.0   # optional, used for future dashboard
+# Tracking (for vehicle tracking / deduplication)
+boxmot>=10.0.0
 
-# Logging & config
-python-dotenv>=1.0.0  # load .env files into os.environ
+# Dataset & training utilities
+albumentations>=1.3.0
+tqdm>=4.65.0
+pyyaml>=6.0
+matplotlib>=3.7.0
+scikit-learn>=1.3.0
+
+# Data handling
+pandas>=2.0.0
+
+# Config & environment
+python-dotenv>=1.0.0
+
+# Optional tools
+kagglehub>=0.2.0

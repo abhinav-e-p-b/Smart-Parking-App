@@ -1,0 +1,7 @@
+python debug_ocr.py --source video.mp4 --video --save-crops outputs/crops/
+
+# Kalman-only (faster on CPU, no ReID file needed)
+python detect_video.py --source video.mp4 --csv outputs/log.csv
+
+# With ReID (better re-identification after occlusion)
+python detect_video.py --source video.mp4 --reid osnet_x0_25_msmt17.pt --csv outputs/log.csv

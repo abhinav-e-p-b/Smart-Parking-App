@@ -1,12 +1,19 @@
-# Ignore virtual environment
+# Virtual environment
 venv/
 
-# Ignore Python cache
+# Python cache
 __pycache__/
 *.pyc
 
-# Ignore system files
+# System files
 .DS_Store
 Thumbs.db
 
+# Project folders
 Documents/
+outputs/
+
+# Files
+*.mp4
+*.zip
+*.pth
