@@ -1,0 +1,14 @@
+# Terminal 1 — entry gate
+python parking_gate.py --mode entry --source 0
+
+# Terminal 2 — exit gate
+python parking_gate.py --mode exit --source 1
+
+Step 8 — Verify It's Working
+Run this in a new terminal at any point to check the database:
+bashpython admin.py status          # vacant/occupied count
+python admin.py sessions        # recent session log
+python admin.py sessions --inside   # who's currently parked
+python admin.py lookup KL07BB1234   # check a specific plate
+
+python admin.py setup-schema

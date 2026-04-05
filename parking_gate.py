@@ -41,7 +41,7 @@ from utils.ocr import PlateReader
 from utils.tracker import PlateTracker
 from utils.visualise import draw_detections, draw_occupancy_overlay, add_fps_overlay
 from utils.snapshot import save_snapshot
-from db import record_entry, record_exit, get_occupancy, lookup_registered_user
+from db.supabase_client import record_entry, record_exit, get_occupancy, lookup_registered_user
 
 # ---------------------------------------------------------------------------
 # Per-mode settings
@@ -183,6 +183,8 @@ class InferenceWorker(threading.Thread):
         self._occ        = {"occupied": 0, "total": cfg.parking.total_slots, "vacant": cfg.parking.total_slots, "pct": 0}
         self._occ_lock   = threading.Lock()
         self.camera_label = MODE_LABELS[mode]
+        # Fetch real occupancy from DB immediately so display is accurate from frame 1
+        self._refresh_occ()
 
     def get_occ(self):
         with self._occ_lock:
@@ -264,7 +266,7 @@ class InferenceWorker(threading.Thread):
 
                 user     = lookup_registered_user(plate)
                 is_reg   = user is not None
-                reg_name = user["name"] if user else "unknown"
+                reg_name = user.get("name", "Member") if user else "unknown"
 
                 snap_path = None
                 if cfg.storage.save_local_snapshots:

@@ -128,7 +128,7 @@ def cmd_manual_exit(args):
 
 def cmd_set_capacity(args):
     db = get_db()
-    db.table("parking_slots").update({"total": args.slots}).eq("zone", "A").execute()
+    db.table("parking_slots").update({"total": args.slots}).eq("zone", "A").eq("is_active", True).execute()
     print(f"  Capacity updated to {args.slots} slots.")
 
 

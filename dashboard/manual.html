@@ -101,10 +101,12 @@
     <strong>⚠ Connection failed</strong> — <span id="conn-error-detail">unknown error</span><br>
     Common causes:<br>
     &nbsp;• Wrong credentials — check <code>SUPABASE_URL</code> / <code>SUPABASE_KEY</code> in this file<br>
-    &nbsp;• <code>parking_slots</code> table missing — run <code>python admin.py setup-schema</code> and paste SQL into Supabase SQL Editor<br>
+    &nbsp;• Tables missing — run <code>python admin.py setup-schema</code> and paste SQL into Supabase SQL Editor<br>
     &nbsp;• Row Level Security blocking reads — run in Supabase SQL Editor:<br>
     &nbsp;&nbsp;<code>ALTER TABLE parking_slots DISABLE ROW LEVEL SECURITY;</code><br>
-    &nbsp;&nbsp;<code>ALTER TABLE parking_sessions DISABLE ROW LEVEL SECURITY;</code>
+    &nbsp;&nbsp;<code>ALTER TABLE parking_sessions DISABLE ROW LEVEL SECURITY;</code><br>
+    &nbsp;&nbsp;<code>ALTER TABLE vehicles DISABLE ROW LEVEL SECURITY;</code><br>
+    &nbsp;&nbsp;<code>ALTER TABLE users DISABLE ROW LEVEL SECURITY;</code>
   </div>
 
   <div class="occ-strip">
@@ -227,8 +229,12 @@ async function loadOccupancy() {
 }
 
 async function checkRegistered(plate) {
-  const r = await api(`registered_users?plate_number=eq.${plate}&limit=1&select=name,email`);
-  return r[0]||null;
+  // vehicles joined to users — registered_users table no longer exists
+  const r = await api(`vehicles?plate_number=eq.${plate}&is_active=eq.true&limit=1&select=plate_number,owner_name,users(name,email)`);
+  if (!r[0]) return null;
+  const row = r[0];
+  const user = (row.users) || {};
+  return { name: user.name || row.owner_name || "Member", email: user.email || "" };
 }
 async function checkInside(plate) {
   const r = await api(`parking_sessions?plate=eq.${plate}&status=eq.inside&limit=1&select=id,entry_time`);

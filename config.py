@@ -51,8 +51,8 @@ class CameraConfig:
 
 @dataclass
 class ParkingConfig:
-    total_slots: int = 50         # set to your actual lot capacity
-    zone: str = "A"
+    total_slots: int = 100        # must match parking_slots.total for zone A in DB
+    zone: str = "A"               # must match parking_slots.zone value in DB
 
 
 @dataclass

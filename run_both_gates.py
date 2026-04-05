@@ -46,18 +46,24 @@ def main():
     print(f"  Entry camera : {entry_src}")
     print(f"  Exit camera  : {exit_src}")
     print(f"  Headless     : {args.headless}")
+    if not args.headless:
+        print("  WARNING: OpenCV imshow is not thread-safe.")
+        print("  If windows freeze or crash, re-run with --headless.")
+        print("  Use individual parking_gate.py instances for GUI mode.")
 
     entry_thread = threading.Thread(
         target=run_gate,
         kwargs=dict(mode="entry", source=entry_src,
-                    model_path=args.model, headless=args.headless),
+                    model_path=args.model,
+                    show=not args.headless, headless=args.headless),
         daemon=True,
         name="entry-gate",
     )
     exit_thread = threading.Thread(
         target=run_gate,
         kwargs=dict(mode="exit", source=exit_src,
-                    model_path=args.model, headless=args.headless),
+                    model_path=args.model,
+                    show=not args.headless, headless=args.headless),
         daemon=True,
         name="exit-gate",
     )
